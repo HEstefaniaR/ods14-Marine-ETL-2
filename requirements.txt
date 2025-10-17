@@ -3,3 +3,6 @@ numpy
 sqlalchemy
 pymysql
 mysql-connector-python
+openmeteo_requests
+requests_cache
+retry_requests

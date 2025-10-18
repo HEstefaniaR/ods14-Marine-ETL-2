@@ -49,6 +49,12 @@ def extract_marine_climate_data(
     - wind_wave_direction_dominant: Dirección dominante del viento (grados)
     - swell_wave_height_max: Altura máxima de oleaje (metros)
     
+    Columnas de ubicación:
+    - latitude: Latitud de la ubicación
+    - longitude: Longitud de la ubicación
+    - ocean: Océano correspondiente (Atlantic/Pacific)
+    - marine_setting: Tipo de ambiente marino (Beach)
+    
     Args:
         output_csv_path: Ruta donde se guarda el histórico
         days_per_batch: Días a extraer por ejecución (default: 30)
@@ -62,7 +68,6 @@ def extract_marine_climate_data(
     logger.info("=" * 80)
     
     last_date, history_exists = get_last_extracted_date(output_csv_path)
-    
     start_date, end_date = calculate_next_date_range(last_date, days_per_batch, earliest_date)
     
     if start_date is None or end_date is None:
@@ -74,7 +79,6 @@ def extract_marine_climate_data(
     client = openmeteo_requests.Client(session=retry_session)
     
     marine_url = "https://marine-api.open-meteo.com/v1/marine"
-    
     all_records = []
     total_locations = len(NORTH_AMERICA_COASTAL_LOCATIONS)
     
@@ -88,18 +92,16 @@ def extract_marine_climate_data(
                 "start_date": start_date,
                 "end_date": end_date,
                 "daily": [
-                    "wave_direction_dominant",      # Dirección dominante de olas
-                    "wave_period_max",              # Período máximo de olas
-                    "wave_height_max",              # Altura máxima de olas
-                    "wind_wave_direction_dominant", # Dirección dominante del viento
-                    "swell_wave_height_max"         # Altura máxima de oleaje
+                    "wave_direction_dominant",
+                    "wave_period_max",
+                    "wave_height_max",
+                    "wind_wave_direction_dominant",
+                    "swell_wave_height_max"
                 ]
             }
             
-            # Llamar a la API
             responses = client.weather_api(marine_url, params=params)
             response = responses[0]
-            
             daily = response.Daily()
             
             dates = pd.date_range(
@@ -120,18 +122,21 @@ def extract_marine_climate_data(
                     "date": date.strftime('%Y-%m-%d'),
                     "location_id": location["id"],
                     "location_name": location["name"],
-                    "latitude": response.Latitude(),
-                    "longitude": response.Longitude(),
+                    "latitude": location["lat"],
+                    "longitude": location["lon"],
+                    "ocean": location["ocean"],
+                    "marine_setting": location["marine_setting"],
                     "wave_direction_dominant": wave_dir[i] if not np.isnan(wave_dir[i]) else None,
                     "wave_period_max": wave_period[i] if not np.isnan(wave_period[i]) else None,
                     "wave_height_max": wave_height[i] if not np.isnan(wave_height[i]) else None,
                     "wind_wave_direction_dominant": wind_wave_dir[i] if not np.isnan(wind_wave_dir[i]) else None,
                     "swell_wave_height_max": swell_height[i] if not np.isnan(swell_height[i]) else None,
+                    
                     "extraction_timestamp": datetime.now().isoformat()
                 }
                 all_records.append(record)
             
-            logger.info(f"  ✓ Extraídos {len(dates)} días para {location['name']}")
+            logger.info(f"  ✓ Extraídos {len(dates)} días para {location['name']} ({location['ocean']})")
             
         except Exception as e:
             logger.error(f"  ✗ Error en {location['name']}: {e}")
@@ -142,11 +147,13 @@ def extract_marine_climate_data(
         return pd.DataFrame()
     
     df_new = pd.DataFrame(all_records)
+    
     logger.info(f"\n{'='*80}")
     logger.info(f"RESUMEN DE EXTRACCIÓN:")
     logger.info(f"  • Registros nuevos: {len(df_new)}")
     logger.info(f"  • Período: {start_date} a {end_date}")
     logger.info(f"  • Ubicaciones: {total_locations}")
+    logger.info(f"  • Océanos cubiertos: {df_new['ocean'].unique().tolist()}")
     logger.info(f"{'='*80}\n")
     
     if history_exists and os.path.exists(output_csv_path):
@@ -166,49 +173,57 @@ def extract_marine_climate_data(
 # Coordenada de costas de norte america
 NORTH_AMERICA_COASTAL_LOCATIONS = [
     # COSTA ESTE (Atlántico)
-    {"id": "miami_fl", "name": "Miami, Florida", "lat": 25.7617, "lon": -80.1918},
-    {"id": "charleston_sc", "name": "Charleston, South Carolina", "lat": 32.7765, "lon": -79.9311},
-    {"id": "outer_banks_nc", "name": "Outer Banks, North Carolina", "lat": 35.5585, "lon": -75.4665},
-    {"id": "chesapeake_bay_md", "name": "Chesapeake Bay, Maryland", "lat": 38.9784, "lon": -76.4922},
-    {"id": "cape_cod_ma", "name": "Cape Cod, Massachusetts", "lat": 41.6688, "lon": -70.2962},
-    {"id": "portland_me", "name": "Portland, Maine", "lat": 43.6591, "lon": -70.2568},
-    {"id": "halifax_ns", "name": "Halifax, Nova Scotia", "lat": 44.6488, "lon": -63.5752},
+    {"id": "miami_fl", "name": "Miami, Florida", "lat": 25.7617, "lon": -80.1918, "ocean": "Atlantic Ocean", "marine_setting": "Beach"},
+    {"id": "charleston_sc", "name": "Charleston, South Carolina", "lat": 32.7765, "lon": -79.9311, "ocean": "Atlantic Ocean", "marine_setting": "Beach"},
+    {"id": "outer_banks_nc", "name": "Outer Banks, North Carolina", "lat": 35.5585, "lon": -75.4665, "ocean": "Atlantic Ocean", "marine_setting": "Beach"},
+    {"id": "chesapeake_bay_md", "name": "Chesapeake Bay, Maryland", "lat": 38.9784, "lon": -76.4922, "ocean": "Atlantic Ocean", "marine_setting": "Beach"},
+    {"id": "cape_cod_ma", "name": "Cape Cod, Massachusetts", "lat": 41.6688, "lon": -70.2962, "ocean": "Atlantic Ocean", "marine_setting": "Beach"},
+    {"id": "portland_me", "name": "Portland, Maine", "lat": 43.6591, "lon": -70.2568, "ocean": "Atlantic Ocean", "marine_setting": "Beach"},
+    {"id": "halifax_ns", "name": "Halifax, Nova Scotia", "lat": 44.6488, "lon": -63.5752, "ocean": "Atlantic Ocean", "marine_setting": "Beach"},
     
-    # COSTA DEL GOLFO DE MÉXICO
-    {"id": "key_west_fl", "name": "Key West, Florida", "lat": 24.5551, "lon": -81.7800},
-    {"id": "tampa_bay_fl", "name": "Tampa Bay, Florida", "lat": 27.7676, "lon": -82.6403},
-    {"id": "mobile_bay_al", "name": "Mobile Bay, Alabama", "lat": 30.6954, "lon": -88.0399},
-    {"id": "galveston_tx", "name": "Galveston, Texas", "lat": 29.3013, "lon": -94.7977},
-    {"id": "corpus_christi_tx", "name": "Corpus Christi, Texas", "lat": 27.8006, "lon": -97.3964},
+    # GOLFO DE MÉXICO
+    {"id": "key_west_fl", "name": "Key West, Florida", "lat": 24.5551, "lon": -81.7800, "ocean": "Atlantic Ocean", "marine_setting": "Beach"},
+    {"id": "tampa_bay_fl", "name": "Tampa Bay, Florida", "lat": 27.7676, "lon": -82.6403, "ocean": "Atlantic Ocean", "marine_setting": "Beach"},
+    {"id": "mobile_bay_al", "name": "Mobile Bay, Alabama", "lat": 30.6954, "lon": -88.0399, "ocean": "Atlantic Ocean", "marine_setting": "Beach"},
+    {"id": "galveston_tx", "name": "Galveston, Texas", "lat": 29.3013, "lon": -94.7977, "ocean": "Atlantic Ocean", "marine_setting": "Beach"},
+    {"id": "corpus_christi_tx", "name": "Corpus Christi, Texas", "lat": 27.8006, "lon": -97.3964, "ocean": "Atlantic Ocean", "marine_setting": "Beach"},
     
     # COSTA OESTE (Pacífico)
-    {"id": "san_diego_ca", "name": "San Diego, California", "lat": 32.7157, "lon": -117.1611},
-    {"id": "los_angeles_ca", "name": "Los Angeles, California", "lat": 33.7701, "lon": -118.1937},
-    {"id": "san_francisco_ca", "name": "San Francisco, California", "lat": 37.7749, "lon": -122.4194},
-    {"id": "seattle_wa", "name": "Seattle, Washington", "lat": 47.6062, "lon": -122.3321},
-    {"id": "vancouver_bc", "name": "Vancouver, British Columbia", "lat": 49.2827, "lon": -123.1207},
+    {"id": "san_diego_ca", "name": "San Diego, California", "lat": 32.7157, "lon": -117.1611, "ocean": "Pacific Ocean", "marine_setting": "Beach"},
+    {"id": "los_angeles_ca", "name": "Los Angeles, California", "lat": 33.7701, "lon": -118.1937, "ocean": "Pacific Ocean", "marine_setting": "Beach"},
+    {"id": "san_francisco_ca", "name": "San Francisco, California", "lat": 37.7749, "lon": -122.4194, "ocean": "Pacific Ocean", "marine_setting": "Beach"},
+    {"id": "seattle_wa", "name": "Seattle, Washington", "lat": 47.6062, "lon": -122.3321, "ocean": "Pacific Ocean", "marine_setting": "Beach"},
+    {"id": "vancouver_bc", "name": "Vancouver, British Columbia", "lat": 49.2827, "lon": -123.1207, "ocean": "Pacific Ocean", "marine_setting": "Beach"},
 ]
 
-# Ultima fecha consultada desde 2023 a 1972
-def get_last_extracted_date(history_csv_path: str) -> Tuple[str, bool]:
-    """
-    Determina la última fecha extraída del histórico.
+
+def get_ocean_from_coordinates(lat: float, lon: float, location_name: str = "") -> str:
+    if lat > 60:
+        return "Arctic Ocean"
     
-    Returns:
-        Tuple con (última_fecha, archivo_existe)
-    """
+    if lat < 30 and -98 <= lon <= -80:
+        return "Atlantic Ocean"
+    
+    if lon > -100:
+        return "Atlantic Ocean"
+    
+    if lon < -100:
+        return "Pacific Ocean"
+    
+    return "Atlantic Ocean"
+
+
+def get_last_extracted_date(history_csv_path: str) -> Tuple[str, bool]:
     if os.path.exists(history_csv_path):
         try:
             df_history = pd.read_csv(history_csv_path)
             if len(df_history) > 0 and 'date' in df_history.columns:
-                # Encontrar la fecha más reciente ya extraída
                 last_date = pd.to_datetime(df_history['date']).max()
                 logger.info(f"Última fecha en histórico: {last_date.strftime('%Y-%m-%d')}")
                 return last_date.strftime('%Y-%m-%d'), True
         except Exception as e:
             logger.warning(f"Error leyendo histórico: {e}. Se iniciará desde el principio.")
     
-    # Si no existe el archivo o está vacío, empezar desde la fecha más reciente disponible
     logger.info("No se encontró histórico. Iniciando desde fecha más reciente.")
     return "2023-12-31", False
 
@@ -222,7 +237,6 @@ def calculate_next_date_range(
     earliest = pd.to_datetime(earliest_date)
     
     end_date = last_date - timedelta(days=1)
-    
     start_date = end_date - timedelta(days=days_per_batch - 1)
     
     if start_date < earliest:
@@ -235,10 +249,8 @@ def calculate_next_date_range(
     logger.info(f"Siguiente rango a extraer: {start_date.strftime('%Y-%m-%d')} a {end_date.strftime('%Y-%m-%d')}")
     return start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')
 
+
 def get_climate_history_summary(history_csv_path: str = "/opt/airflow/data/marine_climate_history.csv"):
-    """
-    Muestra un resumen del histórico de datos climáticos.
-    """
     if not os.path.exists(history_csv_path):
         logger.info("No existe histórico aún.")
         return
@@ -254,8 +266,70 @@ def get_climate_history_summary(history_csv_path: str = "/opt/airflow/data/marin
     print(f"Fecha más antigua: {df['date'].min().strftime('%Y-%m-%d')}")
     print(f"Número de ubicaciones: {df['location_id'].nunique()}")
     print(f"Período cubierto: {(df['date'].max() - df['date'].min()).days} días")
+    
+    if 'ocean' in df.columns:
+        print("\nDistribución por Océano:")
+        for ocean, count in df['ocean'].value_counts().items():
+            print(f"  • {ocean}: {count:,} registros")
+    
     print("\nUbicaciones registradas:")
     for loc in df['location_name'].unique():
         count = len(df[df['location_name'] == loc])
-        print(f"  • {loc}: {count:,} registros")
+        ocean = df[df['location_name'] == loc]['ocean'].iloc[0] if 'ocean' in df.columns else 'N/A'
+        print(f"  • {loc} ({ocean}): {count:,} registros")
     print("="*80 + "\n")
+
+
+# Columnas que se pueden usar en la transformacion
+MICROPLASTICS_COLUMNS = [
+    'Date (MM-DD-YYYY)',
+    'Latitude (degree)',
+    'Longitude(degree)',
+    'Ocean',
+    'Marine Setting',
+    'Sampling Method',
+    'Mesh size (mm)',
+    'Concentration class range',
+    'Concentration class text',
+    'Unit',
+    'Microplastics measurement',
+    'Water Sample Depth (m)',
+    'Collecting Time (min)',
+    'Volunteers Number',
+    'Standardized Nurdle Amount'
+]
+
+SPECIES_COLUMNS = [
+    'scientificName',
+    'kingdom',
+    'phylum',
+    'class',
+    'order',
+    'family',
+    'genus',
+    'taxonRank',
+    'decimalLatitude',
+    'decimalLongitude',
+    'eventDate',
+    'year',
+    'month',
+    'day',
+    'depth',
+    'occurrenceStatus',
+    'individualCount'
+]
+
+CLIMATE_COLUMNS = [
+    'date',
+    'location_id',
+    'location_name',
+    'latitude',
+    'longitude',
+    'ocean',
+    'marine_setting',
+    'wave_direction_dominant',
+    'wave_period_max',
+    'wave_height_max',
+    'wind_wave_direction_dominant',
+    'swell_wave_height_max'
+]

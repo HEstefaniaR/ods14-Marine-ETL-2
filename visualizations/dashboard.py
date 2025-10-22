@@ -1,4 +1,3 @@
-
 import os
 from datetime import datetime
 import mysql.connector
@@ -6,6 +5,7 @@ import pandas as pd
 import dash
 from dash import dcc, html, dash_table, Input, Output, State
 import plotly.express as px
+import subprocess
 
 # ================================
 # Config DB (mismo setup que load.py)
@@ -13,7 +13,7 @@ import plotly.express as px
 DB_CONFIG = {
     "user": os.getenv("MYSQL_USER", "root"),
     "password": os.getenv("MYSQL_PASSWORD", "root"),
-    "host": os.getenv("MYSQL_HOST", "127.0.0.1"),      # Dashboard corre en tu host
+    "host": os.getenv("MYSQL_HOST", "127.0.0.1"),      
     "port": int(os.getenv("MYSQL_PORT", "3306")),
     "database": os.getenv("MYSQL_DB", "marineDB"),
 }
@@ -38,7 +38,7 @@ def execute_query(sql: str, params=None) -> pd.DataFrame:
 
 
 # ================================
-# Consultas base (sin filtros dinámicos)
+# Consultas base
 # ================================
 Q_SUMMARY = """
     SELECT 
@@ -111,20 +111,6 @@ Q_SAMPLING = """
     ORDER BY conteo_uso DESC
 """
 
-Q_SPECIES = """
-    SELECT 
-        ds.scientific_name,
-        ds.kingdom,
-        ds.phylum,
-        ds.class AS class_name,
-        COUNT(msb.fact_microplastics_observation_id) AS conteo_asociaciones
-    FROM dim_species ds
-    JOIN microplastics_species_bridge msb ON ds.species_id = msb.dim_species_species_id
-    GROUP BY ds.species_id, ds.scientific_name, ds.kingdom, ds.phylum, ds.class
-    ORDER BY conteo_asociaciones DESC
-    LIMIT 20
-"""
-
 Q_RAW = """
     SELECT 
         fm.observation_id,
@@ -173,7 +159,7 @@ app.layout = html.Div([
             html.Label("Océano:", style={'fontWeight': 'bold'}),
             dcc.Dropdown(
                 id='ocean-filter',
-                options=[],  # se llena on-demand
+                options=[],  
                 multi=True,
                 placeholder="Seleccionar océanos..."
             )
@@ -187,19 +173,20 @@ app.layout = html.Div([
     # Métricas
     html.Div(id='metrics-cards', style={'marginBottom': '30px'}),
 
-    # Tabs
+    # Tabs (sin especies)
     dcc.Tabs(id='tabs', value='tab-overview', children=[
         dcc.Tab(label='📊 Resumen General', value='tab-overview'),
         dcc.Tab(label='🌍 Análisis Geográfico', value='tab-geo'),
         dcc.Tab(label='📈 Análisis Temporal', value='tab-temporal'),
         dcc.Tab(label='🔬 Métodos de Muestreo', value='tab-sampling'),
-        dcc.Tab(label='🐠 Especies Asociadas', value='tab-species'),
         dcc.Tab(label='📋 Datos Crudos', value='tab-raw'),
     ]),
     html.Div(id='tabs-content')
 ])
 
-# ========== Callbacks ==========
+# ================================
+# Callbacks
+# ================================
 
 # Dropdown océanos
 @app.callback(
@@ -210,8 +197,7 @@ def update_ocean_options(_):
     df = execute_query("SELECT DISTINCT ocean FROM dim_location WHERE ocean IS NOT NULL")
     if df.empty:
         return []
-    opts = [{'label': o, 'value': o} for o in df['ocean'].dropna().unique()]
-    return opts
+    return [{'label': o, 'value': o} for o in df['ocean'].dropna().unique()]
 
 # Métricas
 @app.callback(
@@ -235,16 +221,14 @@ def update_metrics(_):
             'flex': '1', 'minWidth': '200px'
         })
 
-    cards = html.Div([
+    return html.Div([
         card("📊", f"{int(s['total_observaciones']):,}", "Observaciones", "#3498db"),
         card("🌎", f"{int(s['total_ubicaciones']):,}", "Ubicaciones", "#2ecc71"),
         card("🐠", f"{int(s['total_especies']):,}", "Especies", "#e74c3c"),
         card("📏", f"{float(s['avg_medicion']):.2f}", "Medición Promedio", "#9b59b6"),
     ], style={'display': 'flex', 'justifyContent': 'center', 'flexWrap': 'wrap'})
 
-    return cards
-
-# Contenido de tabs
+# Contenido tabs
 @app.callback(
     Output('tabs-content', 'children'),
     [Input('tabs', 'value'), Input('update-button', 'n_clicks')],
@@ -263,16 +247,15 @@ def render_tab(tab, n_clicks, start_date, end_date, oceans):
             return tab_temporal(start_date, end_date)
         if tab == 'tab-sampling':
             return tab_sampling()
-        if tab == 'tab-species':
-            return tab_species()
         if tab == 'tab-raw':
             return tab_raw()
         return html.Div("Tab no reconocido.")
     except Exception as e:
         return html.Div(f"⚠️ Error cargando datos: {e}")
 
-# ========== Renderers por tab ==========
-
+# ================================
+# Funciones de tabs
+# ================================
 def tab_overview():
     df_o = execute_query(Q_OCEANS)
     df_t = execute_query("""
@@ -336,16 +319,6 @@ def tab_sampling():
                  color='avg_medicion', color_continuous_scale='Viridis')
     return dcc.Graph(figure=fig)
 
-def tab_species():
-    df = execute_query(Q_SPECIES)
-    if df.empty:
-        return html.Div("Sin especies relacionadas aún.")
-    fig = px.bar(df, x='scientific_name', y='conteo_asociaciones',
-                 title='Especies Más Asociadas con Microplásticos',
-                 color='phylum', hover_data=['kingdom', 'class_name'])
-    fig.update_layout(xaxis_tickangle=45)
-    return dcc.Graph(figure=fig)
-
 def tab_raw():
     df = execute_query(Q_RAW)
     if df.empty:
@@ -363,5 +336,4 @@ def tab_raw():
 # Run
 # ================================
 if __name__ == "__main__":
-    # Dash >= 2.16 -> .run(), no .run_server()
     app.run(debug=True, host="127.0.0.1", port=8050)

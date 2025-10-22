@@ -1,6 +1,9 @@
 import pandas as pd
 import mysql.connector
 import numpy as np
+from pathlib import Path
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+RAW_CSV = PROJECT_ROOT / "data" / "raw_data" / "marine_microplastics.csv"
 
 config = {
     "user": "root",
@@ -18,7 +21,9 @@ cursor = conn.cursor()
 cursor.execute(f"CREATE DATABASE IF NOT EXISTS {DB_NAME}")
 cursor.execute(f"USE {DB_NAME}")
 
-df = pd.read_csv("./raw_data/marine_microplastics.csv")
+# df = pd.read_csv("./data/raw_data/marine_microplastics.csv")
+df = pd.read_csv(RAW_CSV)
+
 
 def map_dtype(dtype):
     if np.issubdtype(dtype, np.integer):

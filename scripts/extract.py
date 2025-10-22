@@ -13,24 +13,78 @@ from typing import Tuple, List
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def extract_marine_species(csv_path="/opt/airflow/raw_data/marine_species.csv") -> pd.DataFrame:
+import pandas as pd
+import numpy as np
+
+def extract_marine_species(
+    csv_path="/opt/airflow/raw_data/marine_species.csv",
+    sample_fraction=0.5 
+) -> pd.DataFrame:
+    """
+    Lee el archivo de especies marinas detectando el separador automáticamente.
+    Carga solo una fracción del dataset completo (por defecto 50%) para evitar OOM.
+    """
+    def load_with_params(sep, engine="c"):
+        return pd.read_csv(
+            csv_path,
+            sep=sep,
+            engine=engine,
+            quoting=3,
+            on_bad_lines="skip",
+            low_memory=False,
+            encoding="utf-8"
+        )
+
     try:
-        df = pd.read_csv(csv_path, sep="\t", quoting=3, on_bad_lines="skip", low_memory=False)
-        print(f"'Marine Species' TSV cargado correctamente: {df.shape[0]} filas y {df.shape[1]} columnas")
+        # Intentar con TAB primero (común en GBIF)
+        try:
+            df = load_with_params("\t")
+            if df.shape[1] > 10:
+                print(f"✓ Marine Species cargado con TAB: {df.shape[0]} filas × {df.shape[1]} columnas")
+                return df.sample(frac=sample_fraction, random_state=42).reset_index(drop=True)
+        except Exception as e:
+            print(f"[INFO] TAB falló: {e}, intentando otros separadores...")
+        
+        # Intentar con detección automática
+        try:
+            df = load_with_params(None, engine="python")
+            if df.shape[1] > 10:
+                print(f"✓ Marine Species cargado con auto-detect: {df.shape[0]} filas × {df.shape[1]} columnas")
+                return df.sample(frac=sample_fraction, random_state=42).reset_index(drop=True)
+        except Exception as e:
+            print(f"[INFO] Auto-detect falló: {e}, intentando coma...")
+        
+        # Fallback: coma
+        df = load_with_params(",")
+        print(f"✓ Marine Species cargado con coma: {df.shape[0]} filas × {df.shape[1]} columnas")
+        
+        # Tomar solo una parte
+        df = df.sample(frac=sample_fraction, random_state=42).reset_index(drop=True)
+        print(f"[INFO] Se tomó una muestra del {sample_fraction*100:.0f}% → {df.shape[0]} filas")
+        
+        # Validar columnas esperadas
+        expected_cols = ["decimalLatitude", "decimalLongitude", "scientificName"]
+        missing = [c for c in expected_cols if c not in df.columns]
+        if missing:
+            print(f"[WARN] Faltan columnas esperadas: {missing}")
+            print(f"[INFO] Columnas disponibles: {list(df.columns)[:10]}...")
+        
         return df
+
     except Exception as e:
-        print(f"Error al leer 'Marine Species' TSV: {e}")
+        print(f"[CRITICAL] Error extrayendo Marine Species: {e}")
         raise
+        
 
 def extract_microplastics(mysql_conn_str="mysql+pymysql://root:root@host.docker.internal:3306/microplastics_db",
                    table_name="microplastics") -> pd.DataFrame:
     try:
         engine = create_engine(mysql_conn_str)
         df = pd.read_sql_table(table_name, con=engine)
-        print(f"Tabla 'microplastics' cargada correctamente: {df.shape[0]} filas")
+        print(f"✓ Microplastics cargado: {df.shape[0]} filas")
         return df
     except Exception as e:
-        print(f"Error al extraer la tabla 'microplastics' desde MySQL: {e}")
+        print(f"[ERROR] al extraer microplastics desde MySQL: {e}")
         raise
 
 
@@ -39,30 +93,7 @@ def extract_marine_climate_data(
     days_per_batch: int = 30,
     earliest_date: str = "1972-01-01"
 ) -> pd.DataFrame:
-    """
-    Extrae datos climáticos marinos de forma incremental hacia atrás en el tiempo.
-    
-    Variables extraídas:
-    - wave_direction_dominant: Dirección dominante de olas (grados)
-    - wave_period_max: Período máximo de olas (segundos)
-    - wave_height_max: Altura máxima de olas (metros)
-    - wind_wave_direction_dominant: Dirección dominante del viento (grados)
-    - swell_wave_height_max: Altura máxima de oleaje (metros)
-    
-    Columnas de ubicación:
-    - latitude: Latitud de la ubicación
-    - longitude: Longitud de la ubicación
-    - ocean: Océano correspondiente (Atlantic/Pacific)
-    - marine_setting: Tipo de ambiente marino (Beach)
-    
-    Args:
-        output_csv_path: Ruta donde se guarda el histórico
-        days_per_batch: Días a extraer por ejecución (default: 30)
-        earliest_date: Fecha más antigua a extraer
-    
-    Returns:
-        DataFrame con los datos extraídos en esta ejecución
-    """
+    """Extrae datos climáticos marinos de forma incremental."""
     logger.info("=" * 80)
     logger.info("INICIANDO EXTRACCIÓN INCREMENTAL DE DATOS CLIMÁTICOS MARINOS")
     logger.info("=" * 80)
@@ -131,12 +162,11 @@ def extract_marine_climate_data(
                     "wave_height_max": wave_height[i] if not np.isnan(wave_height[i]) else None,
                     "wind_wave_direction_dominant": wind_wave_dir[i] if not np.isnan(wind_wave_dir[i]) else None,
                     "swell_wave_height_max": swell_height[i] if not np.isnan(swell_height[i]) else None,
-                    
                     "extraction_timestamp": datetime.now().isoformat()
                 }
                 all_records.append(record)
             
-            logger.info(f"  ✓ Extraídos {len(dates)} días para {location['name']} ({location['ocean']})")
+            logger.info(f"  ✓ Extraídos {len(dates)} días para {location['name']}")
             
         except Exception as e:
             logger.error(f"  ✗ Error en {location['name']}: {e}")
@@ -152,8 +182,6 @@ def extract_marine_climate_data(
     logger.info(f"RESUMEN DE EXTRACCIÓN:")
     logger.info(f"  • Registros nuevos: {len(df_new)}")
     logger.info(f"  • Período: {start_date} a {end_date}")
-    logger.info(f"  • Ubicaciones: {total_locations}")
-    logger.info(f"  • Océanos cubiertos: {df_new['ocean'].unique().tolist()}")
     logger.info(f"{'='*80}\n")
     
     if history_exists and os.path.exists(output_csv_path):
@@ -170,30 +198,16 @@ def extract_marine_climate_data(
     
     return df_new
 
-# Coordenada de costas de norte america
 NORTH_AMERICA_COASTAL_LOCATIONS = [
-    # COSTA ESTE (Atlántico)
-    {"id": "miami_fl", "name": "Miami, Florida", "lat": 25.7617, "lon": -80.1918, "ocean": "Atlantic Ocean", "marine_setting": "Beach"},
-    {"id": "charleston_sc", "name": "Charleston, South Carolina", "lat": 32.7765, "lon": -79.9311, "ocean": "Atlantic Ocean", "marine_setting": "Beach"},
-    {"id": "outer_banks_nc", "name": "Outer Banks, North Carolina", "lat": 35.5585, "lon": -75.4665, "ocean": "Atlantic Ocean", "marine_setting": "Beach"},
-    {"id": "chesapeake_bay_md", "name": "Chesapeake Bay, Maryland", "lat": 38.9784, "lon": -76.4922, "ocean": "Atlantic Ocean", "marine_setting": "Beach"},
-    {"id": "cape_cod_ma", "name": "Cape Cod, Massachusetts", "lat": 41.6688, "lon": -70.2962, "ocean": "Atlantic Ocean", "marine_setting": "Beach"},
-    {"id": "portland_me", "name": "Portland, Maine", "lat": 43.6591, "lon": -70.2568, "ocean": "Atlantic Ocean", "marine_setting": "Beach"},
-    {"id": "halifax_ns", "name": "Halifax, Nova Scotia", "lat": 44.6488, "lon": -63.5752, "ocean": "Atlantic Ocean", "marine_setting": "Beach"},
+    # Florida / Caribe occidental
+    {"id": "florida_southeast", "name": "South Florida Coast", "lat": 25.5, "lon": -79.5, "ocean": "Atlantic Ocean", "marine_setting": "Beach"},
     
-    # GOLFO DE MÉXICO
-    {"id": "key_west_fl", "name": "Key West, Florida", "lat": 24.5551, "lon": -81.7800, "ocean": "Atlantic Ocean", "marine_setting": "Beach"},
-    {"id": "tampa_bay_fl", "name": "Tampa Bay, Florida", "lat": 27.7676, "lon": -82.6403, "ocean": "Atlantic Ocean", "marine_setting": "Beach"},
-    {"id": "mobile_bay_al", "name": "Mobile Bay, Alabama", "lat": 30.6954, "lon": -88.0399, "ocean": "Atlantic Ocean", "marine_setting": "Beach"},
-    {"id": "galveston_tx", "name": "Galveston, Texas", "lat": 29.3013, "lon": -94.7977, "ocean": "Atlantic Ocean", "marine_setting": "Beach"},
-    {"id": "corpus_christi_tx", "name": "Corpus Christi, Texas", "lat": 27.8006, "lon": -97.3964, "ocean": "Atlantic Ocean", "marine_setting": "Beach"},
+    # Atlántico norte (Massachusetts aprox.)
+    {"id": "massachusetts_coast", "name": "Cape Cod Area", "lat": 40.5, "lon": -70.5, "ocean": "Atlantic Ocean", "marine_setting": "Beach"},
     
-    # COSTA OESTE (Pacífico)
-    {"id": "san_diego_ca", "name": "San Diego, California", "lat": 32.7157, "lon": -117.1611, "ocean": "Pacific Ocean", "marine_setting": "Beach"},
-    {"id": "los_angeles_ca", "name": "Los Angeles, California", "lat": 33.7701, "lon": -118.1937, "ocean": "Pacific Ocean", "marine_setting": "Beach"},
-    {"id": "san_francisco_ca", "name": "San Francisco, California", "lat": 37.7749, "lon": -122.4194, "ocean": "Pacific Ocean", "marine_setting": "Beach"},
-    {"id": "seattle_wa", "name": "Seattle, Washington", "lat": 47.6062, "lon": -122.3321, "ocean": "Pacific Ocean", "marine_setting": "Beach"},
-    {"id": "vancouver_bc", "name": "Vancouver, British Columbia", "lat": 49.2827, "lon": -123.1207, "ocean": "Pacific Ocean", "marine_setting": "Beach"},
+    # Caribe oriental
+    {"id": "antigua_barbuda", "name": "Antigua and Barbuda", "lat": 16.5, "lon": -61.5, "ocean": "Atlantic Ocean", "marine_setting": "Coral Reef"},
+    {"id": "puerto_rico", "name": "Puerto Rico Region", "lat": 16.5, "lon": -64.5, "ocean": "Atlantic Ocean", "marine_setting": "Coral Reef"},
 ]
 
 

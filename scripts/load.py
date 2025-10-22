@@ -1,30 +1,66 @@
 # -*- coding: utf-8 -*-
 """
 Carga el merged en un esquema estrella MySQL (marineDB).
-Tablas: dim_sampling_method, dim_climate, dim_location, dim_date, dim_species,
-        fact_microplastics, microplastics_species_bridge
+OPTIMIZADO: Batch inserts, rutas dinámicas, mejor logging.
 """
 
 import os
+import sys
 import math
 import pandas as pd
 import numpy as np
 import mysql.connector
 from pathlib import Path
+from typing import Optional, Dict, List, Tuple
 
 # --------------------------------------------------------------------
-# Paths y conexión
+# RUTAS DINÁMICAS (compatibles con Airflow y ejecución directa)
 # --------------------------------------------------------------------
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-MERGED_CSV   = PROJECT_ROOT / "processed_data" / "merged_marine_data.csv"
+def get_merged_csv_path() -> Path:
+    """
+    Busca el archivo merged en múltiples ubicaciones.
+    Orden de prioridad:
+    1. Argumento de línea de comandos
+    2. /opt/airflow/processed_data/
+    3. /opt/airflow/data/
+    4. ./processed_data/ (relativo)
+    """
+    if len(sys.argv) > 1:
+        custom_path = Path(sys.argv[1])
+        if custom_path.exists():
+            return custom_path
+    
+    search_paths = [
+        Path("/opt/airflow/processed_data/merged_marine_data.csv"),
+        Path("/opt/airflow/data/merged_marine_data.csv"),
+        Path(__file__).resolve().parents[1] / "processed_data" / "merged_marine_data.csv",
+        Path("./processed_data/merged_marine_data.csv"),
+        Path("./merged_marine_data.csv"),
+    ]
+    
+    for path in search_paths:
+        if path.exists():
+            print(f"[LOAD] ✓ Archivo encontrado: {path}")
+            return path
+    
+    raise FileNotFoundError(
+        f"No se encontró merged_marine_data.csv en ninguna ubicación.\n"
+        f"Ubicaciones buscadas:\n" + "\n".join(f"  - {p}" for p in search_paths)
+    )
 
+MERGED_CSV = get_merged_csv_path()
+
+# --------------------------------------------------------------------
+# Configuración MySQL
+# --------------------------------------------------------------------
 MYSQL = {
     "user": os.getenv("MYSQL_USER", "root"),
     "password": os.getenv("MYSQL_PASSWORD", "root"),
-    "host": os.getenv("MYSQL_HOST", "host.docker.internal"),  # host MySQL local
+    "host": os.getenv("MYSQL_HOST", "host.docker.internal"),
     "port": int(os.getenv("MYSQL_PORT", "3306")),
     "database": os.getenv("MYSQL_DB", "marineDB"),
-    "connection_timeout": 5,
+    "connection_timeout": 10,
+    "autocommit": False,
 }
 DB_NAME = MYSQL["database"]
 
@@ -36,20 +72,19 @@ def _connect_raw(include_db: bool = True):
 
 def connect_db():
     """Crea la BD si no existe y devuelve (conn, cur) conectados a marineDB."""
-    print(f"[LOAD] Intentando conectar a {MYSQL['host']}:{MYSQL['port']} DB={DB_NAME}")
-    # 1) conecta sin DB y crea si falta
+    print(f"[LOAD] Conectando a {MYSQL['host']}:{MYSQL['port']} DB={DB_NAME}")
     conn0 = _connect_raw(include_db=False)
     cur0  = conn0.cursor()
     cur0.execute(f"CREATE DATABASE IF NOT EXISTS {DB_NAME}")
     cur0.close()
     conn0.close()
-    # 2) conecta con DB
+    
     conn = _connect_raw(include_db=True)
     cur  = conn.cursor()
     return conn, cur
 
 # --------------------------------------------------------------------
-# DDL (tablas)
+# DDL (tablas) - CON ÍNDICES OPTIMIZADOS
 # --------------------------------------------------------------------
 DDL = [
     """
@@ -59,7 +94,7 @@ DDL = [
         mesh_size_mm FLOAT,
         concentration_class_range VARCHAR(200),
         concentration_class_text VARCHAR(200),
-        UNIQUE KEY uq_sampling (sampling_method, mesh_size_mm, concentration_class_range, concentration_class_text)
+        UNIQUE KEY uq_sampling (sampling_method(100), mesh_size_mm, concentration_class_range(100), concentration_class_text(100))
     ) ENGINE=InnoDB;
     """,
     """
@@ -70,7 +105,8 @@ DDL = [
         wave_height_max FLOAT,
         wind_wave_direction_dominant FLOAT,
         swell_wave_height_max FLOAT,
-        UNIQUE KEY uq_climate (wave_direction_dominant, wave_period_max, wave_height_max, wind_wave_direction_dominant, swell_wave_height_max)
+        UNIQUE KEY uq_climate (wave_direction_dominant, wave_period_max, wave_height_max, 
+                               wind_wave_direction_dominant, swell_wave_height_max)
     ) ENGINE=InnoDB;
     """,
     """
@@ -80,7 +116,7 @@ DDL = [
         longitude FLOAT,
         ocean VARCHAR(100),
         marine_setting VARCHAR(100),
-        UNIQUE KEY uq_location (latitude, longitude, ocean, marine_setting)
+        UNIQUE KEY uq_location (latitude, longitude, ocean(50), marine_setting(50))
     ) ENGINE=InnoDB;
     """,
     """
@@ -92,7 +128,8 @@ DDL = [
         day INT,
         quarter INT,
         decade INT,
-        UNIQUE KEY uq_date (full_date)
+        UNIQUE KEY uq_date (full_date),
+        INDEX idx_year (year)
     ) ENGINE=InnoDB;
     """,
     """
@@ -105,8 +142,7 @@ DDL = [
         order_name VARCHAR(200),
         family VARCHAR(200),
         genus VARCHAR(200),
-        taxon_rank VARCHAR(200),
-        UNIQUE KEY uq_species (scientific_name, genus, taxon_rank)
+        UNIQUE KEY uq_species (scientific_name(200), genus(100))
     ) ENGINE=InnoDB;
     """,
     """
@@ -118,12 +154,12 @@ DDL = [
         volunteers_count INT,
         standardize_nurdle_amount FLOAT,
         unit VARCHAR(45),
-
         dim_date_date_id INT,
         dim_climate_climate_id INT,
         dim_location_location_id INT,
         dim_sampling_method_sampling_method_id INT,
-
+        INDEX idx_date (dim_date_date_id),
+        INDEX idx_location (dim_location_location_id),
         FOREIGN KEY (dim_date_date_id) REFERENCES dim_date(date_id),
         FOREIGN KEY (dim_climate_climate_id) REFERENCES dim_climate(climate_id),
         FOREIGN KEY (dim_location_location_id) REFERENCES dim_location(location_id),
@@ -152,10 +188,10 @@ PK_COL = {
 }
 
 # --------------------------------------------------------------------
-# Utilidades idempotencia
+# Utilidades idempotencia + CACHE
 # --------------------------------------------------------------------
 def _normalize_scalar(v):
-    """Limpia strings y redondea floats para que el UNIQUE matchee estable."""
+    """Limpia strings y redondea floats para UNIQUE matchee estable."""
     if v is None or (isinstance(v, float) and math.isnan(v)):
         return None
     if isinstance(v, str):
@@ -168,12 +204,28 @@ def _normalize_scalar(v):
 def normalize_values(values):
     return [_normalize_scalar(v) for v in values]
 
-def get_or_create(cur, table, cols, values):
+# CACHE para evitar lookups repetidos
+DIMENSION_CACHE: Dict[str, Dict[tuple, int]] = {
+    "dim_date": {},
+    "dim_location": {},
+    "dim_climate": {},
+    "dim_sampling_method": {},
+    "dim_species": {},
+}
+
+def get_or_create(cur, table, cols, values, use_cache=True):
     """
-    Upsert contra el UNIQUE y devuelve el PK:
-    INSERT ... ON DUPLICATE KEY UPDATE pk = LAST_INSERT_ID(pk)
+    Upsert con CACHE para evitar queries repetidos.
     """
     values = normalize_values(values)
+    
+    # Crear cache key
+    cache_key = tuple(values)
+    
+    # Buscar en cache primero
+    if use_cache and cache_key in DIMENSION_CACHE[table]:
+        return DIMENSION_CACHE[table][cache_key]
+    
     pk = PK_COL[table]
     ph = ", ".join(["%s"] * len(values))
     insert_sql = (
@@ -181,16 +233,31 @@ def get_or_create(cur, table, cols, values):
         f"ON DUPLICATE KEY UPDATE {pk}=LAST_INSERT_ID({pk})"
     )
     cur.execute(insert_sql, tuple(values))
-    return cur.lastrowid
+    pk_value = cur.lastrowid
+    
+    # Guardar en cache
+    if use_cache:
+        DIMENSION_CACHE[table][cache_key] = pk_value
+    
+    return pk_value
 
 def ensure_schema(cur):
+    print("[LOAD] Creando esquema de tablas...")
     for sql in DDL:
         cur.execute(sql)
+    print("[LOAD] ✓ Esquema creado/verificado")
 
 def coalesce(row, *cands):
+    """
+    Busca la primera columna disponible (case-insensitive).
+    CRÍTICO: Maneja _micro/_climate/_species sufijos.
+    """
+    col_map = {c.lower(): c for c in row.index}
+    
     for c in cands:
-        if c in row and pd.notna(row[c]):
-            return row[c]
+        c_lower = c.lower()
+        if c_lower in col_map and pd.notna(row[col_map[c_lower]]):
+            return row[col_map[c_lower]]
     return None
 
 def build_date_parts(d):
@@ -209,25 +276,76 @@ def build_date_parts(d):
     )
 
 # --------------------------------------------------------------------
-# Carga principal
+# BATCH INSERT (para optimizar fact_microplastics)
+# --------------------------------------------------------------------
+def batch_insert_facts(cur, batch: List[Tuple], batch_size: int = 500):
+    """
+    Inserta múltiples facts de una vez (más rápido que row-by-row).
+    """
+    if not batch:
+        return []
+    
+    placeholders = ",".join(["(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"] * len(batch))
+    flat_values = [v for row in batch for v in row]
+    
+    sql = f"""
+        INSERT INTO fact_microplastics
+        (measurement, water_sample_depth, collecting_time_min, volunteers_count, 
+         standardize_nurdle_amount, unit, dim_date_date_id, dim_climate_climate_id, 
+         dim_location_location_id, dim_sampling_method_sampling_method_id)
+        VALUES {placeholders}
+    """
+    
+    cur.execute(sql, flat_values)
+    
+    # Obtener los IDs insertados
+    last_id = cur.lastrowid
+    return list(range(last_id, last_id + len(batch)))
+
+# --------------------------------------------------------------------
+# Carga principal OPTIMIZADA
 # --------------------------------------------------------------------
 def main():
-    if not MERGED_CSV.exists():
-        raise FileNotFoundError(f"No existe {MERGED_CSV}")
-
-    print(f"[LOAD*] leyendo {MERGED_CSV}")
+    print("\n" + "="*80)
+    print("INICIANDO CARGA A BASE DE DATOS (marineDB)")
+    print("="*80)
+    
+    print(f"[LOAD] Leyendo {MERGED_CSV}")
     df = pd.read_csv(MERGED_CSV, low_memory=False)
     df.rename(columns={c: c.strip() for c in df.columns}, inplace=True)
+    
+    print(f"[LOAD] Total filas: {len(df):,}")
+    print(f"[LOAD] Columnas disponibles: {list(df.columns)[:15]}...")
 
     conn, cur = connect_db()
     ensure_schema(cur)
 
     inserted = 0
+    skipped = 0
+    species_links = 0
+    
+    # Estadísticas
+    stats = {
+        "clima_matches": 0,
+        "species_matches": 0,
+        "no_measurement": 0,
+    }
+    
+    # Batch processing
+    BATCH_SIZE = 500
+    fact_batch = []
+    species_batch = []
+    
     conn.start_transaction()
 
-    for _, row in df.iterrows():
+    print("\n[LOAD] Procesando filas...")
+    for idx, row in df.iterrows():
+        # Progress indicator
+        if (idx + 1) % 1000 == 0:
+            print(f"[LOAD] Procesadas {idx + 1:,}/{len(df):,} filas ({(idx+1)/len(df)*100:.1f}%)")
+        
         # ---------- DATE ----------
-        date_val = coalesce(row, "date", "date_micro", "date_climate")
+        date_val = coalesce(row, "date", "_date_day", "date_micro", "date_climate")
         date_parts = build_date_parts(date_val)
         date_id = None
         if date_parts:
@@ -239,10 +357,10 @@ def main():
             )
 
         # ---------- LOCATION ----------
-        lat = coalesce(row, "latitude_micro", "latitude_climate", "latitude")
-        lon = coalesce(row, "longitude_micro", "longitude_climate", "longitude")
-        ocean = coalesce(row, "ocean_micro", "ocean_climate", "ocean")
-        mset  = coalesce(row, "marine_setting_micro", "marine_setting_climate", "marine_setting")
+        lat = coalesce(row, "latitude", "latitude_micro", "latitude_climate")
+        lon = coalesce(row, "longitude", "longitude_micro", "longitude_climate")
+        ocean = coalesce(row, "ocean", "ocean_micro", "ocean_climate")
+        mset  = coalesce(row, "marine_setting", "marine_setting_micro", "marine_setting_climate")
         loc_id = None
         if (lat is not None) and (lon is not None):
             loc_id = get_or_create(
@@ -252,18 +370,27 @@ def main():
             )
 
         # ---------- CLIMATE ----------
+        wave_dir = coalesce(row, "wave_direction_dominant", "wave_direction_dominant_climate")
+        wave_per = coalesce(row, "wave_period_max", "wave_period_max_climate")
+        wave_hgt = coalesce(row, "wave_height_max", "wave_height_max_climate")
+        wind_dir = coalesce(row, "wind_wave_direction_dominant", "wind_wave_direction_dominant_climate")
+        swell_hgt = coalesce(row, "swell_wave_height_max", "swell_wave_height_max_climate")
+        
         clim_cols = ["wave_direction_dominant", "wave_period_max", "wave_height_max",
                      "wind_wave_direction_dominant", "swell_wave_height_max"]
-        clim_vals = [row.get(c) if c in row else None for c in clim_cols]
+        # Convertir NaN a None y asegurar floats
+        clim_vals_clean = [None if pd.isna(v) else float(v) for v in [wave_dir, wave_per, wave_hgt, wind_dir, swell_hgt]]
+
         clim_id = None
-        if any(pd.notna(v) for v in clim_vals):
-            clim_id = get_or_create(cur, "dim_climate", clim_cols, clim_vals)
+        if any(v is not None for v in clim_vals_clean):
+            clim_id = get_or_create(cur, "dim_climate", clim_cols, clim_vals_clean)
+            stats["clima_matches"] += 1
 
         # ---------- SAMPLING METHOD ----------
-        sm = coalesce(row, "sampling_method_micro", "sampling_method")
-        mesh = coalesce(row, "mesh_size_micro", "mesh_size")
-        cc_range = coalesce(row, "concentration_class_range_micro", "concentration_class_range")
-        cc_text  = coalesce(row, "concentration_class_text_micro", "concentration_class_text")
+        sm = coalesce(row, "sampling_method", "sampling_method_micro")
+        mesh = coalesce(row, "mesh_size", "mesh_size_micro", "mesh_size_mm")
+        cc_range = coalesce(row, "concentration_class_range", "concentration_class_range_micro")
+        cc_text  = coalesce(row, "concentration_class_text", "concentration_class_text_micro")
         sm_id = None
         if sm or mesh or cc_range or cc_text:
             sm_id = get_or_create(
@@ -273,56 +400,93 @@ def main():
             )
 
         # ---------- FACT ----------
-        measurement = coalesce(row, "microplastics_measurement_micro", "microplastics_measurement")
-        water_depth = coalesce(row, "water_sample_depth_micro", "water_sample_depth")
-        coll_time   = coalesce(row, "collecting_time_min_micro", "collecting_time", "collecting_time_min")
-        volunteers  = coalesce(row, "volunteers_number_micro", "volunteers_number", "volunteers_count")
-        nurdles     = coalesce(row, "standardized_nurdle_amount_micro", "standardized_nurdle_amount", "standarize_nurdle_amount")
-        unit        = coalesce(row, "unit_micro", "unit")
+        measurement = coalesce(row, "microplastics_measurement", "microplastics_measurement_micro")
+        water_depth = coalesce(row, "water_sample_depth", "water_sample_depth_micro")
+        coll_time   = coalesce(row, "collecting_time_min", "collecting_time", "collecting_time_micro")
+        volunteers  = coalesce(row, "volunteers_number", "volunteers_count", "volunteers_number_micro")
+        nurdles     = coalesce(row, "standardized_nurdle_amount", "standardized_nurdle_amount_micro", "standardize_nurdle_amount")
+        unit        = coalesce(row, "unit", "unit_micro")
 
-        cur.execute("""
-            INSERT INTO fact_microplastics
-            (measurement, water_sample_depth, collecting_time_min, volunteers_count, standardize_nurdle_amount, unit,
-             dim_date_date_id, dim_climate_climate_id, dim_location_location_id, dim_sampling_method_sampling_method_id)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        """, (measurement, water_depth, coll_time, volunteers, nurdles, unit,
-              date_id, clim_id, loc_id, sm_id))
-        fact_id = cur.lastrowid
+        # Validar measurement
+        if measurement is None or pd.isna(measurement):
+            skipped += 1
+            stats["no_measurement"] += 1
+            continue
 
-        # ---------- SPECIES (opcional) ----------
-        spec_name = coalesce(row, "scientific_name", "species", "species_clean")
-        if spec_name:
+        # Agregar a batch
+        fact_batch.append((
+            measurement, water_depth, coll_time, volunteers, nurdles, unit,
+            date_id, clim_id, loc_id, sm_id
+        ))
+
+        # ---------- SPECIES (preparar para batch) ----------
+        spec_name = coalesce(row, "scientific_name", "scientificname", "species", "species_clean", "scientific_name_species")
+        if spec_name and not pd.isna(spec_name):
             species_vals = {
                 "scientific_name": spec_name,
-                "kingdom": row.get("kingdom"),
-                "phylum": row.get("phylum"),
-                "class": row.get("class") if "class" in row else row.get("class_species"),
-                "order_name": row.get("order") if "order" in row else row.get("order_species"),
-                "family": row.get("family"),
-                "genus": row.get("genus"),
-                "taxon_rank": row.get("taxon_rank") if "taxon_rank" in row else row.get("taxonrank"),
+                "kingdom": coalesce(row, "kingdom", "kingdom_species"),
+                "phylum": coalesce(row, "phylum", "phylum_species"),
+                "class": coalesce(row, "class", "class_species"),
+                "order_name": coalesce(row, "order", "order_species", "order_name"),
+                "family": coalesce(row, "family", "family_species"),
+                "genus": coalesce(row, "genus", "genus_species"),
             }
             species_id = get_or_create(
                 cur, "dim_species",
                 list(species_vals.keys()),
                 list(species_vals.values())
             )
-            if fact_id and date_id and species_id:
+            species_batch.append((None, date_id, species_id))  # fact_id se asignará después
+            stats["species_matches"] += 1
+
+        # Procesar batch cuando alcance el tamaño
+        if len(fact_batch) >= BATCH_SIZE:
+            fact_ids = batch_insert_facts(cur, fact_batch, BATCH_SIZE)
+            
+            # Insertar species bridges correspondientes
+            for i, (_, date_id, species_id) in enumerate(species_batch[-len(fact_batch):]):
+                if date_id and species_id:
+                    cur.execute("""
+                        INSERT IGNORE INTO microplastics_species_bridge
+                        (fact_microplastics_observation_id, dim_date_date_id, dim_species_species_id)
+                        VALUES (%s,%s,%s)
+                    """, (fact_ids[i], date_id, species_id))
+                    species_links += 1
+            
+            inserted += len(fact_batch)
+            fact_batch = []
+            conn.commit()  # Commit periódico
+
+    # Procesar batch restante
+    if fact_batch:
+        fact_ids = batch_insert_facts(cur, fact_batch, BATCH_SIZE)
+        
+        for i, (_, date_id, species_id) in enumerate(species_batch[-len(fact_batch):]):
+            if date_id and species_id:
                 cur.execute("""
                     INSERT IGNORE INTO microplastics_species_bridge
                     (fact_microplastics_observation_id, dim_date_date_id, dim_species_species_id)
                     VALUES (%s,%s,%s)
-                """, (fact_id, date_id, species_id))
-
-        inserted += 1
-        if inserted % 1000 == 0:
-            conn.commit()
-            print(f"[LOAD*] {inserted} filas procesadas...")
+                """, (fact_ids[i], date_id, species_id))
+                species_links += 1
+        
+        inserted += len(fact_batch)
 
     conn.commit()
+    
+    # Estadísticas finales
+    print("\n" + "="*80)
+    print("CARGA COMPLETADA")
+    print("="*80)
+    print(f"✓ Filas insertadas en fact_microplastics: {inserted:,}")
+    print(f"✓ Links especies creados: {species_links:,}")
+    print(f"✓ Con datos de clima: {stats['clima_matches']:,} ({stats['clima_matches']/max(inserted,1)*100:.1f}%)")
+    print(f"✓ Con especies: {stats['species_matches']:,} ({stats['species_matches']/max(inserted,1)*100:.1f}%)")
+    print(f"⚠ Filas sin measurement (omitidas): {skipped:,}")
+    print("="*80 + "\n")
+    
     cur.close()
     conn.close()
-    print(f"[LOAD*] Carga terminada. Filas fact: {inserted}")
 
 if __name__ == "__main__":
     main()

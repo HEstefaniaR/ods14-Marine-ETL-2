@@ -1,52 +1,56 @@
 # /opt/airflow/scripts/transform.py
 import os
 import re
-import csv
 import pandas as pd
 import numpy as np
 
-# ============================================================== #
-#                      UTILIDADES BASE                           #
-# ============================================================== #
+
+# ==============================================================
+# UTILIDADES BASE
+# ==============================================================
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    EXPLICIT_MAP = {
+        "Date (MM-DD-YYYY)": "date",
+        "Latitude (degree)": "latitude",
+        "Longitude(degree": "longitude",
+        "Mesh size (mm)": "mesh_size",
+        "Microplastics measurement": "microplastics_measurement",
+        "Water Sample Depth (m)": "water_sample_depth",
+        "Marine Setting": "marine_setting",
+        "Sampling Method": "sampling_method",
+        "Concentration class range": "concentration_class_range",
+        "Concentration class text": "concentration_class_text",
+        "DOI": "doi",
+        "OBJECTID": "objectid",
+        "decimalLatitude": "decimallatitude",
+        "decimalLongitude": "decimallongitude",
+        "scientificName": "scientific_name",
+    }
     new_cols = {}
     for col in df.columns:
+        if col in EXPLICIT_MAP:
+            new_cols[col] = EXPLICIT_MAP[col]
+            continue
         clean = col.strip().lower()
-        clean = re.sub(r"\(.*?\)", "", clean)
-        clean = re.sub(r"\[.*?\]", "", clean)
-        clean = re.sub(r"[^0-9a-z]+", "_", clean)
+        clean = re.sub(r"\(.*?\)|\[.*?\]|[^0-9a-z]+", "_", clean)
         clean = re.sub(r"_+", "_", clean).strip("_")
         new_cols[col] = clean
     return df.rename(columns=new_cols)
 
 
 def read_csv_smart(path: str) -> pd.DataFrame:
-    """Lee CSV intentando detectar el separador y corrige si todo está en una sola columna."""
-    try:
-        df = pd.read_csv(path, sep=None, engine="python", low_memory=False)
-    except Exception:
-        df = pd.read_csv(path, sep=",", low_memory=False)
-
-    # Si vino todo en una columna, forzar coma como separador
-    if df.shape[1] == 1:
+    for sep in ["\t", ",", ";"]:
         try:
-            df = pd.read_csv(path, sep=",", low_memory=False)
-            print(f"[INFO] Forzado separador ',' en: {path}")
+            df = pd.read_csv(path, sep=sep, low_memory=False, on_bad_lines="skip", encoding="utf-8")
+            if df.shape[1] > 1:
+                return df
         except Exception:
-            print(f"[ERROR] No se pudo leer correctamente el archivo: {path}")
-    return df
-
-
-def find_col(df: pd.DataFrame, candidates, required=True):
-    cand_norm = [normalize_columns(pd.DataFrame(columns=[c])).columns[0] for c in candidates]
-    norm_map = {normalize_columns(pd.DataFrame(columns=[c])).columns[0]: c for c in df.columns}
-    for c in cand_norm:
-        if c in norm_map:
-            return norm_map[c]
-    if required:
-        raise KeyError(f"Ninguna de las columnas {candidates} existe en el DataFrame.")
-    return None
+            continue
+    try:
+        return pd.read_csv(path, sep=None, engine="python", low_memory=False, on_bad_lines="skip", encoding="utf-8")
+    except Exception:
+        return pd.DataFrame()
 
 
 def infer_ocean(lat, lon):
@@ -57,207 +61,193 @@ def infer_ocean(lat, lon):
     return "Pacific Ocean" if lon < -100 else "Atlantic Ocean"
 
 
-# ============================================================== #
-#                  LIMPIEZA MICROPLÁSTICOS                       #
-# ============================================================== #
+def assign_grid_vectorized(lat_series, lon_series, cell_size=3.0):
+    grid_lat = np.floor(lat_series / cell_size) * cell_size + (cell_size / 2)
+    grid_lon = np.floor(lon_series / cell_size) * cell_size + (cell_size / 2)
+    return grid_lat.round(2), grid_lon.round(2)
+
+
+# ==============================================================
+# LIMPIEZA DE DATOS
+# ==============================================================
 
 def clean_microplastics_data(df):
+    if df.empty:
+        return df
     df = normalize_columns(df)
-    df = df[df["latitude"].between(5, 83) & df["longitude"].between(-180, -50)]
-    if "date" in df:
+    if "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df["ocean"] = df.apply(lambda r: infer_ocean(r["latitude"], r["longitude"]), axis=1)
+    if {"latitude", "longitude"}.issubset(df.columns):
+        df = df[df["latitude"].between(5, 83) & df["longitude"].between(-180, -50)]
+    if "ocean" not in df.columns or df["ocean"].isna().all():
+        df["ocean"] = df.apply(lambda r: infer_ocean(r.get("latitude"), r.get("longitude")), axis=1)
     return df
 
-
-# ============================================================== #
-#                    LIMPIEZA ESPECIES                           #
-# ============================================================== #
 
 def clean_marine_species_data(df):
+    if df.empty:
+        return df
     df = normalize_columns(df)
-    try:
-        lat_col = find_col(df, ["decimallatitude", "latitude"])
-        lon_col = find_col(df, ["decimallongitude", "longitude"])
-    except KeyError:
-        print("[ERROR] No se encontraron columnas de coordenadas en species.csv")
-        # devuelve DF vacío con MISMAS columnas (para que to_csv escriba encabezados)
-        return df.head(0)
-
-    df = df.rename(columns={lat_col: "decimallatitude", lon_col: "decimallongitude"})
-    df = df[df["decimallatitude"].between(5, 83) & df["decimallongitude"].between(-180, -50)]
+    lat_col = next((c for c in ["decimallatitude", "latitude", "lat"] if c in df.columns), None)
+    lon_col = next((c for c in ["decimallongitude", "longitude", "lon"] if c in df.columns), None)
+    if lat_col and lon_col:
+        df = df.rename(columns={lat_col: "decimallatitude", lon_col: "decimallongitude"})
+        df["decimallatitude"] = pd.to_numeric(df["decimallatitude"], errors="coerce")
+        df["decimallongitude"] = pd.to_numeric(df["decimallongitude"], errors="coerce")
+        df = df[df["decimallatitude"].between(5, 83) & df["decimallongitude"].between(-180, -50)]
+    if "eventdate" in df.columns:
+        df["eventdate"] = pd.to_datetime(df["eventdate"], errors="coerce")
     return df
 
 
-# ============================================================== #
-#                    LIMPIEZA CLIMA                              #
-# ============================================================== #
-
 def clean_climate_data(df):
+    if df.empty:
+        return df
     df = normalize_columns(df)
-    df = df[df["latitude"].between(5, 83) & df["longitude"].between(-180, -50)]
-    if "date" in df:
+    if {"latitude", "longitude"}.issubset(df.columns):
+        df = df[df["latitude"].between(5, 83) & df["longitude"].between(-180, -50)]
+    if "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
     return df
 
 
-# ============================================================== #
-#                    ORQUESTADOR PRINCIPAL                       #
-# ============================================================== #
+# ==============================================================
+# PIPELINE PRINCIPAL
+# ==============================================================
 
 def transform_data(microplastics_path, species_path, climate_path, output_dir):
     os.makedirs(output_dir, exist_ok=True)
 
-    # --- Lectura robusta --- #
-    df_micro = read_csv_smart(microplastics_path)
-    df_spec  = read_csv_smart(species_path)
-    df_clim  = read_csv_smart(climate_path)
+    df_micro = clean_microplastics_data(read_csv_smart(microplastics_path))
+    df_spec = clean_marine_species_data(read_csv_smart(species_path))
+    df_clim = clean_climate_data(read_csv_smart(climate_path))
 
-    # --- Limpieza --- #
-    microplastics_clean  = clean_microplastics_data(df_micro)
-    marine_species_clean = clean_marine_species_data(df_spec)
-    climate_clean        = clean_climate_data(df_clim)
-
-    #--- Guardado intermedio --- #
-    out_micro   = os.path.join(output_dir, "microplastics_clean.csv")
+    # Guardar intermedios
+    out_micro = os.path.join(output_dir, "microplastics_clean.csv")
     out_species = os.path.join(output_dir, "marine_species_clean.csv")
     out_climate = os.path.join(output_dir, "climate_clean.csv")
+    df_micro.to_csv(out_micro, index=False)
+    df_spec.to_csv(out_species, index=False)
+    df_clim.to_csv(out_climate, index=False)
 
-    microplastics_clean.to_csv(out_micro, index=False)
-    marine_species_clean.to_csv(out_species, index=False)
-    climate_clean.to_csv(out_climate, index=False)
+    CELL_SIZE = 3.0
 
-    print(f"[transform] guardado: {out_micro}")
-    print(f"[transform] guardado: {out_species}")
-    print(f"[transform] guardado: {out_climate}")
+    # Crear grillas
+    if {"latitude", "longitude"}.issubset(df_micro.columns):
+        df_micro["grid_lat"], df_micro["grid_lon"] = assign_grid_vectorized(df_micro["latitude"], df_micro["longitude"], CELL_SIZE)
+    if {"decimallatitude", "decimallongitude"}.issubset(df_spec.columns):
+        df_spec["grid_lat"], df_spec["grid_lon"] = assign_grid_vectorized(df_spec["decimallatitude"], df_spec["decimallongitude"], CELL_SIZE)
+    if {"latitude", "longitude"}.issubset(df_clim.columns):
+        df_clim["grid_lat"], df_clim["grid_lon"] = assign_grid_vectorized(df_clim["latitude"], df_clim["longitude"], CELL_SIZE)
 
-        # --- Merge final (asof por fecha dentro del MISMO AÑO + coords, con fallback y por grupos) --- #
-    try:
-        print("[transform] Iniciando fusión de datasets (asof por fecha dentro del mismo año y celda geo)...")
+    # Agregación climática
+    if not df_clim.empty:
+        df_clim_grid = df_clim.groupby(["grid_lat", "grid_lon", "date"], as_index=False).agg({
+            "wave_direction_dominant": "mean",
+            "wave_period_max": "mean",
+            "wave_height_max": "mean",
+            "wind_wave_direction_dominant": "mean",
+            "swell_wave_height_max": "mean",
+            "ocean": "first",
+            "marine_setting": "first"
+        })
+    else:
+        df_clim_grid = pd.DataFrame()
 
-        def ensure_round_coords(df, lat_col, lon_col, df_name):
-            df = df.copy()
-            if lat_col in df.columns and lon_col in df.columns:
-                df["lat_round"] = pd.to_numeric(df[lat_col], errors="coerce").round(2)
-                df["lon_round"] = pd.to_numeric(df[lon_col], errors="coerce").round(2)
-            else:
-                missing = [c for c in (lat_col, lon_col) if c not in df.columns]
-                print(f"[transform] WARN: {df_name} sin columnas {missing}; no se crean lat_round/lon_round.")
-            return df
+    # Filtrar válidos
+    micro_valid = df_micro.dropna(subset=["grid_lat", "grid_lon", "date"]) if not df_micro.empty else pd.DataFrame()
+    climate_valid = df_clim_grid.dropna(subset=["grid_lat", "grid_lon", "date"]) if not df_clim_grid.empty else pd.DataFrame()
+    species_valid = df_spec.dropna(subset=["grid_lat", "grid_lon"]) if not df_spec.empty else pd.DataFrame()
 
-        def ensure_date_year(df, date_col, df_name):
-            df = df.copy()
-            if date_col in df.columns:
-                dc = pd.to_datetime(df[date_col], errors="coerce")
-                df["_date_day"] = pd.to_datetime(dc.dt.date)
-                df["_year"] = df["_date_day"].dt.year
-            else:
-                df["_date_day"] = pd.NaT
-                df["_year"] = pd.NA
-                print(f"[transform] WARN: {df_name} sin columna '{date_col}'")
-            return df
+    # Merge micro + clima
+    if not micro_valid.empty and not climate_valid.empty:
+        merged_mc = pd.merge_asof(
+            micro_valid.sort_values("date"),
+            climate_valid.sort_values("date"),
+            on="date",
+            by=["grid_lat", "grid_lon"],
+            direction="nearest",
+            tolerance=pd.Timedelta("60D"),
+            suffixes=("_micro", "_climate")
+        )
+    else:
+        merged_mc = micro_valid if not micro_valid.empty else df_micro
 
-        # Preparación
-        microplastics_clean  = ensure_round_coords(microplastics_clean,  "latitude",        "longitude",        "microplastics")
-        climate_clean        = ensure_round_coords(climate_clean,        "latitude",        "longitude",        "climate")
-        marine_species_clean = ensure_round_coords(marine_species_clean, "decimallatitude", "decimallongitude", "species")
+    # Agregar especies
+    if not species_valid.empty:
+        species_agg = species_valid.groupby(["grid_lat", "grid_lon"], as_index=False).agg({
+            "scientific_name": "first",
+            "kingdom": "first",
+            "phylum": "first",
+            "class": "first",
+            "order": "first",
+            "family": "first",
+            "genus": "first"
+        })
+        merged_all = pd.merge(merged_mc, species_agg, on=["grid_lat", "grid_lon"], how="left")
+    else:
+        merged_all = merged_mc
 
-        microplastics_clean  = ensure_date_year(microplastics_clean, "date", "microplastics")
-        climate_clean        = ensure_date_year(climate_clean,       "date", "climate")
+    merged_out = os.path.join(output_dir, "merged_marine_data.csv")
+    merged_all.to_csv(merged_out, index=False)
 
-        # FILTRO de claves y tipos
-        left = microplastics_clean.dropna(subset=["lat_round","lon_round","_date_day","_year"]).copy()
-        right = climate_clean.dropna(subset=["lat_round","lon_round","_date_day","_year"]).copy()
-
-        if len(left) == 0:
-            print("[transform] WARN: microplastics vacío tras filtrar; no hay nada que fusionar. Se guardará igual.")
-            merged_mc = microplastics_clean.copy()  # conserva todo lo que haya
-        elif len(right) == 0:
-            print("[transform] WARN: clima vacío tras filtrar; fallback (micro + species).")
-            merged_mc = left.copy()
-        else:
-            # Tipos consistentes
-            left["_year"]  = left["_year"].astype("int64")
-            right["_year"] = right["_year"].astype("int64")
-            for c in ("lat_round","lon_round"):
-                left[c]  = left[c].astype(float)
-                right[c] = right[c].astype(float)
-
-            # --- ASOF POR GRUPOS para evitar 'left keys must be sorted' global ---
-            groups = sorted(set(zip(left["lat_round"], left["lon_round"], left["_year"])))
-            out_chunks = []
-            tol = pd.Timedelta("90D")
-
-            for (la, lo, yr) in groups:
-                l_g = left[(left["lat_round"]==la) & (left["lon_round"]==lo) & (left["_year"]==yr)].copy()
-                r_g = right[(right["lat_round"]==la) & (right["lon_round"]==lo) & (right["_year"]==yr)].copy()
-
-                # Si no hay clima en ese grupo, dejamos solo micro de ese grupo
-                if len(r_g) == 0:
-                    out_chunks.append(l_g)
-                    continue
-
-                # Orden estricto SOLO por la clave temporal dentro del grupo
-                l_g = l_g.sort_values("_date_day").reset_index(drop=True)
-                r_g = r_g.sort_values("_date_day").reset_index(drop=True)
-
-                merged_g = pd.merge_asof(
-                    l_g, r_g,
-                    left_on="_date_day",
-                    right_on="_date_day",
-                    direction="nearest",
-                    tolerance=tol,
-                    suffixes=("_micro","_climate")
-                )
-                out_chunks.append(merged_g)
-
-            merged_mc = pd.concat(out_chunks, ignore_index=True)
-            print(f"[transform] merged_mc shape (micro ⟂ climate asof same-year por grupos): {merged_mc.shape}")
-
-        # Agregar species por coords (si existe)
-        if {"lat_round","lon_round"}.issubset(marine_species_clean.columns) and len(marine_species_clean) > 0:
-            merged_all = pd.merge(
-                merged_mc,
-                marine_species_clean,
-                how="left",
-                on=["lat_round","lon_round"],
-                suffixes=("", "_species"),
-                copy=False
-            )
-            print(f"[transform] merged_all (con species) shape: {merged_all.shape}")
-        else:
-            print("[transform] WARN: species sin coords o vacío; se deja solo micro (+clima si hubo).")
-            merged_all = merged_mc
-
-        # Fecha final (si falta, úsala desde _date_day)
-        if "date" not in merged_all.columns or merged_all["date"].isna().all():
-            merged_all["date"] = merged_all.get("_date_day", pd.NaT)
-
-        # Guardar y copiar a /opt/airflow/data
-        merged_out = os.path.join(output_dir, "merged_marine_data.csv")
-        merged_all.to_csv(merged_out, index=False)
-        print(f"[transform] guardado merge final: {merged_out}")
-
-        try:
-            data_dir = "/opt/airflow/data"
-            merged_copy = os.path.join(data_dir, "merged_marine_data.csv")
-            with open(merged_out, "rb") as src, open(merged_copy, "wb") as dst:
-                dst.write(src.read())
-            print(f"[transform] copia del merge en: {merged_copy}")
-        except Exception as e:
-            print(f"[WARN] No se pudo copiar el merge a /opt/airflow/data: {e}")
-
-    except Exception as e:
-        print(f"[WARN] No se pudo generar el merge final: {e}")
-        merged_out = None
-
-
-
-    return {   
+    return {
         "microplastics": out_micro,
         "species": out_species,
         "climate": out_climate,
         "merged": merged_out
     }
 
-    
+
+# ==============================================================
+# BLOQUE DE DEPURACIÓN LOCAL
+# ==============================================================
+
+if __name__ == "__main__":
+    DATA_DIR = "./data"
+    OUTPUT_DIR = "./data/processed_data"
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    micro_path = os.path.join(DATA_DIR, "microplastics.csv")
+    species_path = os.path.join(DATA_DIR, "marine_species.csv")
+    climate_path = os.path.join(DATA_DIR, "marine_climate_history.csv")
+
+    outputs = transform_data(micro_path, species_path, climate_path, OUTPUT_DIR)
+
+    print("\n=== RESULTADOS ===")
+    for k, v in outputs.items():
+        print(f"{k}: {v}")
+
+    # Mostrar coincidencias
+    df_micro = pd.read_csv(outputs["microplastics"], low_memory=False)
+    df_species = pd.read_csv(outputs["species"], low_memory=False)
+    df_climate = pd.read_csv(outputs["climate"], low_memory=False)
+    df_merged = pd.read_csv(outputs["merged"], low_memory=False)
+
+    for df, name in [(df_micro, "micro"), (df_species, "species"), (df_climate, "climate")]:
+        if "grid_lat" not in df.columns or "grid_lon" not in df.columns:
+            if "latitude" in df.columns and "longitude" in df.columns:
+                df["grid_lat"], df["grid_lon"] = assign_grid_vectorized(df["latitude"], df["longitude"])
+            elif "decimallatitude" in df.columns and "decimallongitude" in df.columns:
+                df["grid_lat"], df["grid_lon"] = assign_grid_vectorized(df["decimallatitude"], df["decimallongitude"])
+
+    coords_micro = set(zip(df_micro["grid_lat"].dropna(), df_micro["grid_lon"].dropna()))
+    coords_species = set(zip(df_species["grid_lat"].dropna(), df_species["grid_lon"].dropna()))
+    coords_climate = set(zip(df_climate["grid_lat"].dropna(), df_climate["grid_lon"].dropna()))
+
+    inter_micro_climate = coords_micro & coords_climate
+    inter_micro_species = coords_micro & coords_species
+    inter_all = coords_micro & coords_climate & coords_species
+
+    print("\n=== COINCIDENCIAS DE COORDENADAS ===")
+    print(f"Microplastics ↔ Climate: {len(inter_micro_climate)} coincidencias")
+    print(f"Microplastics ↔ Species: {len(inter_micro_species)} coincidencias")
+    print(f"TODOS (3 conjuntos): {len(inter_all)} coincidencias")
+    print(f"Registros finales en merge: {len(df_merged)}")
+
+    if inter_all:
+        print("\nEjemplo de coordenadas coincidentes:")
+        for coord in list(inter_all)[:5]:
+            print(f"  Grid lat/lon: {coord}")
+    else:
+        print("\nNo hubo coincidencias exactas entre los tres datasets.")

@@ -42,27 +42,25 @@ Automate the ingestion, validation, cleaning, and integration of marine environm
 ## ETL Pipeline Architecture
 
 <p align="center">
-  <img src="./diagrams/DAG pipeline.png" width="750"/>
+  <img src="./diagrams/ETL_Pipeline.png" width="750"/>
 </p>
 
 **Pipeline flow:**
-
-1. **Extract** – Pulls data from three sources:
-   - MySQL database (`microplastics_db`)
-   - CSV dataset (`marine_species.csv`)
-   - Public API (**Open-Meteo**) for oceanic climate metrics
-2. **Pre-Data Quality** – Runs initial validations with Great Expectations.
-3. **Transform & Merge** – Cleans, standardizes, filters North American coordinates, and merges by spatial grid and date proximity.
-4. **Post-Data Quality** – Re-validates merged data and generates an Excel summary report.
-5. **Load** – Inserts clean data into a MySQL **star schema** (`marineDB`).
-6. **Visualization** – Dash dashboard displays KPIs and interactive insights.
-
+1. Extract: Retrieves raw data from multiple sources: Microplastics and marine species datasets
+2.	First Transform (Grid Generation): Cleans and standardizes the raw datasets, then generates spatial grid references combining species and microplastic data. These grids define the coordinates used to request detailed climate records.
+3.	Climate Extraction: Oceanic climate data from the Open-Meteo API, based on generated grid coordinates. Uses the generated grids to download historical oceanic climate data (e.g., temperature, wind, and wave metrics) for each location.
+4.	Pre-Data Quality Check: Runs Great Expectations validations on the extracted data to ensure schema consistency, data completeness, and valid value ranges.
+5.	Final Transform (Integration): Combines microplastics, biodiversity, and climate datasets into a unified structure, aligning by spatial and temporal proximity. Outputs multiple processed files, including the final merged dataset.
+6.	Post-Data Quality Check: Re-runs Great Expectations to verify data integrity after transformation, generating both Excel and CSV quality reports.
+7.	Load: Loads the validated dataset into a MySQL star schema (marineDB) for analytical queries and visualization.
+8.	Visualization: The Dash dashboard presents environmental KPIs such as record counts, species diversity, microplastic levels, and average wave height.
+  
 ---
 
 ## Airflow DAG Design
 
 <p align="center">
-  <img src="./images/dag_diagram.jpg" width="700"/>
+  <img src="./diagrams/DAG Pipeline.png" width="700"/>
 </p>
 
 **DAG ID:** `etl_ods14_marine_life`
@@ -71,16 +69,16 @@ Automate the ingestion, validation, cleaning, and integration of marine environm
 
 **Task flow:**
 
-| Step | Task ID                         | Description                                                |
-| ---- | ------------------------------- | ---------------------------------------------------------- |
-| 1    | `extract_microplastics_task`  | Extracts microplastics data from MySQL.                    |
-| 2    | `extract_marine_species_task` | Loads and samples the marine species dataset.              |
-| 3    | `extract_climate_data_task`   | Queries historical marine climate data via Open-Meteo API. |
-| 4    | `validate_pre_task`           | Performs pre-transformation data quality checks.           |
-| 5    | `transform_task`              | Cleans, filters, grids, and merges datasets.               |
-| 6    | `validate_post_task`          | Applies post-merge Great Expectations validation.          |
-| 7    | `load_to_db_task`             | Loads validated data into the MySQL Data Warehouse.        |
-
+| Step | Task ID                            | Description                                                                 |
+| ---- | ---------------------------------- | --------------------------------------------------------------------------- |
+| 1    | `extract_microplastics_task`       | Extracts microplastics data from the MySQL source and saves it as CSV.      |
+| 2    | `extract_marine_species_task`      | Downloads and samples marine species data from GBIF.                        |
+| 3    | `transform_first_pass_task`        | Generates initial spatial grids (`grids_catalog.csv`) for climate extraction. |
+| 4    | `extract_climate_from_grids_task`  | Retrieves historical ocean climate data from Open-Meteo API using grid cells. |
+| 5    | `validate_pre_task`                | Runs pre-transformation Great Expectations validation on raw datasets.      |
+| 6    | `transform_final_task`             | Performs full data transformation, merging climate, species, and microplastics. |
+| 7    | `validate_post_task`               | Applies post-merge data validation ensuring integrity and consistency.       |
+| 8    | `load_to_db_task`                  | Loads the final validated dataset into the MySQL Data Warehouse.             |
 ---
 
 ## Data Extraction
@@ -108,14 +106,6 @@ Automated validation ensures **data integrity and reliability** before and after
   - *Post-Data Quality:* re-evaluates integrity of merged data (domain & range rules).
 - **Output:** summarized **Excel reports** combining all validation results.
 
-**Examples of expectations:**
-
-- Non-null values for key columns (`date`, `latitude`, `longitude`).
-- Latitude ∈ [5, 83], Longitude ∈ [−180, −50].
-- DOI patterns valid (`^10\.\d{4,9}/[-._;()/:A-Za-z0-9]+$`).
-- Unique compound keys (`objectid + date`).
-- Units within allowed set (`items/m3`, `items/l`, `items/km2`).
-
 ---
 
 ## Transformation & Merge
@@ -137,21 +127,22 @@ Performed by [`transform.py`](scripts/transform.py):
 ## Star Schema Design
 
 <p align="center">
-  <img src="./images/star_schema.jpg" width="750"/>
+  <img src="./diagrams/Star Schema.png" width="750"/>
 </p>
 
 **Database:** `marineDB`
 Designed for fast analytical queries and flexible slicing by dimension.
 
-| Table                            | Type      | Description                                                                   |
-| -------------------------------- | --------- | ----------------------------------------------------------------------------- |
-| `fact_microplastics`           | Fact      | Main table containing microplastic measurements and related dimension keys.   |
-| `dim_date`                     | Dimension | Temporal context (date, month, year, quarter, decade).                        |
-| `dim_location`                 | Dimension | Geographic info (latitude, longitude, ocean, setting).                        |
-| `dim_climate`                  | Dimension | Ocean climate attributes (wave height, period, direction).                    |
-| `dim_sampling_method`          | Dimension | Details about sampling methodology and mesh size.                             |
-| `dim_species`                  | Dimension | Taxonomic attributes (kingdom, phylum, class, order, family, genus, species). |
-| `microplastics_species_bridge` | Bridge    | Links facts with associated species per date.                                 |
+| Table                            | Type      | Description                                                                                           |
+| -------------------------------- | --------- | ----------------------------------------------------------------------------------------------------- |
+| `fact_microplastics`             | **Fact**  | Central table storing microplastic measurements linked to time, location, climate, and sampling method. |
+| `dim_date`                       | Dimension | Provides temporal context (date, year, month, day, quarter, decade).                                  |
+| `dim_location`                   | Dimension | Geographic reference (latitude, longitude, ocean, and marine setting).                               |
+| `dim_climate`                    | Dimension | Captures marine climate indicators: wave height, period, direction, wind-wave, and swell parameters.  |
+| `dim_sampling_method`            | Dimension | Details the sampling methodology, concentration class, and mesh-related metadata.                     |
+| `dim_species`                    | Dimension | Stores taxonomic hierarchy: kingdom, phylum, class, order, family, genus, and scientific name.        |
+| `microplastics_species_bridge`   | Bridge    | Many-to-many relationship linking microplastic observations to associated species by date.             |
+
 
 ---
 
@@ -161,46 +152,59 @@ Designed for fast analytical queries and flexible slicing by dimension.
 **File:** `visualizations/dashboard.py`
 **Execution:** runs locally and connects directly to `marineDB`.
 
-**Features:**
+Features:
 
-- KPI cards: total records, locations, species richness, mean measurement.
-- Tabs:
-  - Summary Overview
-  - Geographical distribution (map)
-  - Temporal trends
-  - Sampling methods
-  - Raw data viewer
+- KPI Cards: total microplastic records, locations, species richness, climate records, and average concentration.
+Tabs:
 
+- Summary Overview: global view of microplastic pollution and climate trends.
+- Critical Zones: interactive map showing contamination hotspots.
+- Temporal Trends: time-series analysis of microplastic levels, biodiversity, and ocean conditions.
+- Biodiversity: taxonomic diversity and species exposure to microplastics.
+- Climate & Correlations: relationships between ocean climate variables and pollution levels.
+- Sampling Methods: comparison of collection techniques and concentration variability.
+  
 ---
 
-## How to Run Locally
+How to Run Locally
 
-### 1. Clone the repository
+1. Clone the repository
 
-```bash
+```
 git clone https://github.com/HEstefaniaR/ods14-Marine-ETL-2.git
 cd ods14-Marine-ETL-2
 ```
 
-### 2. Create and activate a virtual environment
+2. Download the data (required)
 
-```bash
+Download the raw datasets from the following link: [data_raw](https://drive.google.com/drive/folders/1kI5Ygzks55naB40aIRATPcKPhOcrlKvT?usp=sharing)
+
+After downloading, place all files inside: `/data/data_raw/`.
+
+**Important**: The ETL pipeline and dashboard require these files to be present in data/data_raw before running any extraction or transformation scripts.
+
+3. Create and activate a virtual environment
+
+```
 python -m venv venv
 source venv/bin/activate      # on Linux/Mac
 venv\Scripts\activate         # on Windows
 ```
 
-### 3. Install dependencies
+4. Install dependencies
 
-```bash
+```
 pip install -r requirements.txt
 ```
 
-### 4. Start MySQL and Airflow
+5. Start MySQL and Airflow
 
-Ensure MySQL is running and accessible (default: `host.docker.internal:3306`).
+Ensure MySQL is running and accessible (default: host.docker.internal:3306).
 
-Edit the scripts/load.py, visualizations/dashboardy.py and init/init-sql.py files and update credentials if needed:
+Edit the following files to update credentials if needed:
+	•	scripts/load.py
+	•	visualizations/dashboard.py
+	•	init/init-sql.py
 
 ```
 USER = "root"
@@ -209,25 +213,25 @@ HOST = "localhost"
 PORT = 3306
 ```
 
-And run:
+Then initialize the database schema:
 
 ```
 python init/init-sql.py
 ```
 
-Run Docker Compose:
+Start Airflow and supporting services:
 
-```bash
+```
 docker compose up -d
 ```
 
-### 5. Launch the Dashboard
+6. Launch the Dashboard
 
-```bash
+```
 python visualizations/dashboard.py
 ```
 
-Access locally at: [http://localhost:8050](http://localhost:8050)
+Access the dashboard locally at: [http://localhost:8050](http://localhost:8050)
 
 ---
 
@@ -245,7 +249,7 @@ Access locally at: [http://localhost:8050](http://localhost:8050)
 
 ---
 
-## 📁 Repository Structure
+## Repository Structure
 
 ```bash
 ODS14-MARINE-ETL-2/
@@ -260,10 +264,7 @@ ODS14-MARINE-ETL-2/
 │   ├── dataqualitycheck.py
 │   └── __init__.py
 ├── visualizations/dashboard.py
-├── images/
-│   ├── etl_pipeline.png
-│   ├── dag_diagram.jpg
-│   └── star_schema.jpg
+├── diagrams/
 ├── EDA.ipynb
 ├── docker-compose.yaml
 ├── requirements.txt

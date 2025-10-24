@@ -210,4 +210,7 @@ __marimo__/
 
 airflow/logs
 
-data/
+data/raw_data/*
+data/processed_data/*
+/data/*
+!/data/*/

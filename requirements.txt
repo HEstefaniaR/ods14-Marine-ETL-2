@@ -10,3 +10,4 @@ great_expectations
 openpyxl
 dash
 scipy
+kafka-python 

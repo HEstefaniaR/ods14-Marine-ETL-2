@@ -61,18 +61,19 @@ class MicroplasticsMetricsProducer:
             logger.error(f"Error ejecutando consulta: {e}")
             return []
 
+    # 🔧 CORREGIDA: usa ocean y marine_setting en lugar de country
     def metric_avg_concentration(self):
         return self.query_db("""
             SELECT 
-                dl.ocean,
-                dl.country,
+                dl.ocean AS ocean_region,
+                dl.marine_setting AS environment_type,
                 AVG(fm.measurement) AS avg_concentration,
                 COUNT(*) AS total_observations,
                 fm.unit
             FROM fact_microplastics fm
             JOIN dim_location dl ON fm.dim_location_location_id = dl.location_id
             WHERE fm.measurement IS NOT NULL
-            GROUP BY dl.ocean, dl.country, fm.unit
+            GROUP BY dl.ocean, dl.marine_setting, fm.unit
             ORDER BY avg_concentration DESC
             LIMIT 10;
         """)

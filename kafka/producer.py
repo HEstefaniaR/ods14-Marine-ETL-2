@@ -14,6 +14,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 class MicroplasticsMetricsProducer:
     def __init__(
         self,
@@ -24,7 +25,7 @@ class MicroplasticsMetricsProducer:
         db_user="root",
         db_password="root",
         db_name="marineDB",
-        interval_seconds=10
+        interval_seconds=5
     ):
         self.kafka_topic = kafka_topic
         self.interval_seconds = interval_seconds
@@ -46,23 +47,30 @@ class MicroplasticsMetricsProducer:
             retries=3,
             compression_type="gzip"
         )
-        logger.info("Productor Kafka inicializado correctamente")
+        logger.info("Kafka producer listo.")
 
     def get_db_connection(self):
         return pymysql.connect(**self.db_config)
 
-    def query_db(self, query):
+    def query_db(self, query, params=None):
         try:
             with self.get_db_connection() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute(query)
+                    cursor.execute(query, params)
                     return cursor.fetchall()
         except Exception as e:
-            logger.error(f"Error ejecutando consulta: {e}")
+            logger.error(f"SQL error: {e}")
             return []
 
-    # 🔧 CORREGIDA: usa ocean y marine_setting en lugar de country
-    def metric_avg_concentration(self):
+    def get_years(self):
+        years = self.query_db("""
+            SELECT DISTINCT year
+            FROM dim_date
+            ORDER BY year ASC;
+        """)
+        return [row["year"] for row in years]
+
+    def metric_avg_concentration(self, year):
         return self.query_db("""
             SELECT 
                 dl.ocean AS ocean_region,
@@ -72,90 +80,95 @@ class MicroplasticsMetricsProducer:
                 fm.unit
             FROM fact_microplastics fm
             JOIN dim_location dl ON fm.dim_location_location_id = dl.location_id
-            WHERE fm.measurement IS NOT NULL
-            GROUP BY dl.ocean, dl.marine_setting, fm.unit
-            ORDER BY avg_concentration DESC
-            LIMIT 10;
-        """)
-
-    def metric_observations_by_time(self):
-        return self.query_db("""
-            SELECT 
-                dd.year,
-                dd.month,
-                COUNT(*) AS total_observations,
-                AVG(fm.measurement) AS avg_measurement,
-                fm.unit
-            FROM fact_microplastics fm
             JOIN dim_date dd ON fm.dim_date_date_id = dd.date_id
-            WHERE fm.measurement IS NOT NULL
-            GROUP BY dd.year, dd.month, fm.unit
-            ORDER BY dd.year DESC, dd.month DESC
-            LIMIT 12;
-        """)
-
-    def metric_max_concentration_climate(self):
+            WHERE dd.year = %s
+            GROUP BY dl.ocean, dl.marine_setting, fm.unit
+            ORDER BY avg_concentration DESC;
+        """, (year,))
+    
+    def metric_ecological_risk_raw(self, year):
         return self.query_db("""
             SELECT 
-                CASE 
-                    WHEN dc.wave_height_max < 2 THEN 'calm'
-                    WHEN dc.wave_height_max BETWEEN 2 AND 4 THEN 'moderate'
-                    ELSE 'rough'
-                END AS sea_condition,
-                MAX(fm.measurement) AS max_concentration,
-                AVG(fm.measurement) AS avg_concentration,
-                COUNT(*) AS observation_count,
-                fm.unit
+                dl.ocean AS ocean_region,
+                dl.marine_setting AS environment_type,
+                COUNT(*) AS total_microplastics,
+                AVG(fm.measurement) AS avg_pollution,
+                COUNT(DISTINCT msb.dim_species_species_id) AS species_count,
+                (AVG(fm.measurement) * COUNT(DISTINCT msb.dim_species_species_id)) AS risk_raw
             FROM fact_microplastics fm
-            JOIN dim_climate dc ON fm.dim_climate_climate_id = dc.climate_id
-            WHERE fm.measurement IS NOT NULL
-            GROUP BY sea_condition, fm.unit
-            ORDER BY max_concentration DESC;
-        """)
+            JOIN dim_location dl ON dl.location_id = fm.dim_location_location_id
+            JOIN dim_date dd ON dd.date_id = fm.dim_date_date_id
+            LEFT JOIN microplastics_species_bridge msb 
+                   ON msb.fact_microplastics_observation_id = fm.observation_id
+            WHERE dd.year = %s
+            GROUP BY dl.ocean, dl.marine_setting
+            ORDER BY risk_raw DESC;
+        """, (year,))
 
-    def send_metric(self, metric_type, data):
-        if not data:
-            logger.info(f"No hay datos para {metric_type}")
-            return
+    def metric_ecological_risk(self, year):
+        raw = self.metric_ecological_risk_raw(year)
+        if not raw:
+            return []
 
+        vals = [r["risk_raw"] for r in raw]
+        mn, mx = min(vals), max(vals)
+        if mx == mn:
+            for r in raw:
+                r["risk_index"] = 0
+            return raw
+
+        for r in raw:
+            r["risk_index"] = 100 * (r["risk_raw"] - mn) / (mx - mn)
+
+        return raw
+
+    def send_metric(self, metric_type, year, data):
         message = {
             "metric_type": metric_type,
+            "year": year,
             "timestamp": datetime.now().isoformat(),
             "data": data,
             "record_count": len(data)
         }
 
         try:
-            future = self.producer.send(self.kafka_topic, key=metric_type, value=message)
-            record_metadata = future.get(timeout=10)
-            logger.info(
-                f"Métrica enviada ({metric_type}) - Topic: {record_metadata.topic}, "
-                f"Partition: {record_metadata.partition}, Offset: {record_metadata.offset}"
+            fut = self.producer.send(
+                self.kafka_topic, key=metric_type, value=message
             )
+            meta = fut.get(timeout=10)
+            logger.info(f"Sent {metric_type} year={year} offset={meta.offset}")
         except KafkaError as e:
-            logger.error(f"Error enviando {metric_type} a Kafka: {e}")
+            logger.error(f"Kafka send error: {e}")
+
 
     def run(self):
-        logger.info("Iniciando productor de métricas (Ctrl+C para detener)")
-        iteration = 0
+        logger.info("Producer ON (annual only).")
+
         try:
             while True:
-                iteration += 1
-                logger.info(f"Iteración #{iteration}")
-                self.send_metric("avg_concentration_by_region", self.metric_avg_concentration())
-                self.send_metric("observations_by_timeperiod", self.metric_observations_by_time())
-                self.send_metric("max_concentration_by_climate", self.metric_max_concentration_climate())
-                self.producer.flush()
-                time.sleep(self.interval_seconds)
+                years = self.get_years()
+                logger.info(f"Años detectados: {years}")
+
+                for year in years:
+                    logger.info(f"Producing metrics for year {year}")
+
+                    self.send_metric("avg_concentration_by_region", year, self.metric_avg_concentration(year))
+                    self.send_metric("ecological_risk_index", year, self.metric_ecological_risk(year))
+
+                    time.sleep(self.interval_seconds)
+
+                logger.info("Ciclo completo. Reiniciando desde el primer año...")
+
         except KeyboardInterrupt:
-            logger.info("Productor detenido manualmente.")
+            logger.info("Producer detenido manualmente.")
+
         finally:
             self.close()
 
     def close(self):
-        logger.info("Cerrando productor...")
+        logger.info("Cerrando productor Kafka…")
         self.producer.close()
-        logger.info("Productor cerrado correctamente.")
+
 
 def main():
     config = {
@@ -166,10 +179,10 @@ def main():
         "db_user": os.getenv("DB_USER", "root"),
         "db_password": os.getenv("DB_PASSWORD", "root"),
         "db_name": os.getenv("DB_NAME", "marineDB"),
-        "interval_seconds": int(os.getenv("INTERVAL_SECONDS", "10")),
+        "interval_seconds": int(os.getenv("INTERVAL_SECONDS", "5")),
     }
-    producer = MicroplasticsMetricsProducer(**config)
-    producer.run()
+    MicroplasticsMetricsProducer(**config).run()
+
 
 if __name__ == "__main__":
     main()

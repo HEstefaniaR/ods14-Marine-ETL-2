@@ -3,7 +3,7 @@ import mysql.connector
 import numpy as np
 from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-RAW_CSV = PROJECT_ROOT / "data" / "raw_data" / "marine_microplastics.csv"
+RAW_CSV = PROJECT_ROOT / "data" / "raw_data" / "microplastics.csv"
 
 config = {
     "user": "root",

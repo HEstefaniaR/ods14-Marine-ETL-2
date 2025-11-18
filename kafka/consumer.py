@@ -16,7 +16,6 @@ from dash.dependencies import Input, Output
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# estado en memoria
 RECENT_MESSAGES: deque = deque(maxlen=500)
 LATEST_BY_TYPE: Dict[str, Dict[str, Any]] = {}
 BY_TYPE_MESSAGE_COUNT: Dict[str, int] = {}
@@ -24,12 +23,11 @@ LOCK = threading.Lock()
 TOTAL_MESSAGES = 0
 LAST_SUCCESSFUL_CONSUME: float = 0.0
 
-# region-year averages: year, ocean_region, environment_type, avg_concentration, total_observations, unit
+
 DF_REGION_YEAR = pd.DataFrame(columns=[
     "year", "ocean_region", "environment_type", "avg_concentration", "total_observations", "unit"
 ])
 
-# ecological risk per year-region: year, ocean_region, environment_type, avg_pollution, species_count, total_microplastics, risk_raw, risk_index
 DF_RISK_YEAR = pd.DataFrame(columns=[
     "year", "ocean_region", "environment_type", "avg_pollution", "species_count", "total_microplastics", "risk_raw", "risk_index"
 ])
@@ -38,7 +36,6 @@ DF_RISK_YEAR = pd.DataFrame(columns=[
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "microplastics-metrics")
 
-# Producer ahora solo envia métricas anuales; no necesitamos monthly_observations
 ALLOWED_TYPES = {
     "avg_concentration_by_region",
     "ecological_risk_index",
@@ -49,7 +46,6 @@ REFRESH_INTERVAL_MS = int(os.getenv("DASH_POLL_INTERVAL_MS", "500"))
 
 
 def consumer_loop(bootstrap_servers=KAFKA_BOOTSTRAP, topic=KAFKA_TOPIC):
-    """Hilo que escucha Kafka y actualiza estructuras en memoria (upsert)."""
     global TOTAL_MESSAGES, LAST_SUCCESSFUL_CONSUME, DF_REGION_YEAR, DF_RISK_YEAR
     backoff = 1
     logger.info(f"Connecting to Kafka {bootstrap_servers} topic {topic}")
@@ -155,7 +151,6 @@ def consumer_loop(bootstrap_servers=KAFKA_BOOTSTRAP, topic=KAFKA_TOPIC):
             backoff = min(backoff * 2, 60)
 
 
-# utilidades para el dashboard (lectura segura)
 def _latest_year_from_region():
     with LOCK:
         if DF_REGION_YEAR.empty and DF_RISK_YEAR.empty:
@@ -169,7 +164,6 @@ def _latest_year_from_region():
 
 
 def _build_kpis():
-    """Construye tarjetas: total messages, current year, KPIs del año actual."""
     with LOCK:
         total = TOTAL_MESSAGES
         dfr = DF_RISK_YEAR.copy()
@@ -260,7 +254,6 @@ def build_dash_app():
                             "boxShadow": "0 2px 6px rgba(0,0,0,0.06)", "padding": "10px"}),
         ], style={"display": "flex", "gap": "12px"}),
 
-        # Nuevo: gráfico total observations per year
         html.Div([dcc.Graph(id="obs-graph")],
                  style={"marginTop": "20px", "backgroundColor": "#fff", "borderRadius": "10px",
                         "boxShadow": "0 2px 6px rgba(0,0,0,0.06)", "padding": "10px"}),
@@ -282,7 +275,6 @@ def build_dash_app():
         Input("interval-refresh", "n_intervals"),
     )
     def refresh(_):
-        # Build KPIs
         kpis = _build_kpis()
 
         # AVG by region: stacked bars per year (each segment = ocean)
@@ -291,8 +283,7 @@ def build_dash_app():
         fig_avg = go.Figure()
         if not df_reg.empty:
             df_reg["year"] = df_reg["year"].astype(int)
-            # create label for region segment (we keep environment_type in hover only)
-            df_reg["region_label"] = df_reg["ocean_region"].fillna("")  # now stacked by ocean only label
+            df_reg["region_label"] = df_reg["ocean_region"].fillna("") 
             pivot = df_reg.pivot_table(index="year", columns="region_label", values="avg_concentration", aggfunc="mean", fill_value=0)
             years = list(pivot.index.astype(str))
             # stacked bars: add a trace per ocean
@@ -300,24 +291,22 @@ def build_dash_app():
                 fig_avg.add_bar(x=years, y=pivot[col].values, name=str(col))
             fig_avg.update_layout(barmode="stack", title="Avg concentration by ocean (annual, stacked)")
 
-        # Risk graph: lines per OCEAN across years (risk_index); hover includes environment_type, species_count, total_microplastics, avg_pollution, risk_raw
         with LOCK:
             df_risk = DF_RISK_YEAR.copy()
         fig_risk = go.Figure()
         if not df_risk.empty:
             df_risk["year"] = df_risk["year"].astype(int)
-            # group by ocean and year, but keep environment info in hover by taking latest env per ocean-year (if multiple, show first)
             oceans = df_risk["ocean_region"].dropna().unique()
             for ocean in oceans:
                 df_o = df_risk[df_risk["ocean_region"] == ocean].sort_values("year")
-                # prepare hover customdata: env, species_count, total_microplastics, avg_pollution, risk_raw
+
                 custom_cols = []
                 for col in ["environment_type", "species_count", "total_microplastics", "avg_pollution", "risk_raw"]:
                     if col in df_o.columns:
                         custom_cols.append(df_o[col].astype(object).values)
                     else:
                         custom_cols.append([None] * len(df_o))
-                # stack into shape (n, k)
+
                 import numpy as _np
                 customdata = _np.column_stack(custom_cols)
                 fig_risk.add_scatter(
@@ -339,15 +328,12 @@ def build_dash_app():
                 )
             fig_risk.update_layout(title="Ecological risk index by ocean (annual)")
 
-        # ==== Total Observations per Year ====
         with LOCK:
             df_reg_for_obs = DF_REGION_YEAR.copy()
         fig_obs = go.Figure()
         if not df_reg_for_obs.empty:
             df_reg_for_obs["year"] = df_reg_for_obs["year"].astype(int)
-            # agrupar por año sumando observaciones
             grouped = df_reg_for_obs.groupby("year")["total_observations"].sum().reset_index()
-            # asegurar orden por año
             grouped = grouped.sort_values("year")
             fig_obs.add_scatter(
                 x=grouped["year"].astype(str),
@@ -355,7 +341,6 @@ def build_dash_app():
                 mode="lines+markers",
                 name="Total observations"
             )
-            # linea de promedio
             avg_val = grouped["total_observations"].mean()
             fig_obs.add_hline(y=avg_val, line_dash="dash", annotation_text=f"Avg = {avg_val:.1f}", annotation_position="top left")
             fig_obs.update_layout(
@@ -365,7 +350,6 @@ def build_dash_app():
                 margin=dict(t=40, b=40, l=40, r=20)
             )
 
-        # recent messages
         with LOCK:
             recent = list(RECENT_MESSAGES)[:20]
         if recent:
@@ -379,9 +363,7 @@ def build_dash_app():
             ])
         else:
             recent_div = html.Div("No recent messages")
-
         return kpis, fig_avg, fig_risk, fig_obs, recent_div
-
     return app
 
 
@@ -389,7 +371,7 @@ def run_server():
     t = threading.Thread(target=consumer_loop, daemon=True)
     t.start()
     app = build_dash_app()
-    app.run(host="127.0.0.1", port=8050, debug=False)
+    app.run(host="127.0.0.1", port=8051, debug=False)
 
 
 if __name__ == "__main__":

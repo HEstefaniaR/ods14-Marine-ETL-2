@@ -1,4 +1,5 @@
-# 🌊 ODS14 – Marine Data ETL Pipeline
+
+# ODS14 – Marine Data ETL Pipeline
 
 ![Python](https://img.shields.io/badge/Python-3.9%2B-blue?logo=python)
 ![Airflow](https://img.shields.io/badge/Apache%20Airflow-Orchestration-success?logo=apacheairflow)
@@ -9,63 +10,64 @@
 ---
 
 ## Project Overview
+This project implements an automated ETL (Extract–Transform–Load) pipeline aligned with ODS Goal 14 (Life Below Water).
+The pipeline integrates environmental and biodiversity data: marine species, microplastic pollution, and ocean climate variables; to support monitoring and analysis of marine ecosystem health in North America.
 
-This project implements an **automated ETL (Extract–Transform–Load) pipeline** aligned with **UN Sustainable Development Goal 14 (Life Below Water)**.
-The pipeline integrates environmental and biodiversity data — **marine species**, **microplastic pollution**, and **ocean climate variables** — to support monitoring and analysis of **marine ecosystem health** in **North America**.
-
-Built with **Apache Airflow**, **Great Expectations**, **Pandas**, and **Dash**, the solution automates data ingestion, quality validation, consolidation, and visualization through a star-schema Data Warehouse.
+Built with Apache Airflow, Kafka, Great Expectations, Pandas, and Dash, the solution automates data ingestion, quality validation, consolidation, and visualization through a star-schema Data Warehouse.
 
 ---
 
 ## Refined Objectives
 
 ### Main Objective
-
-Automate the ingestion, validation, cleaning, and integration of marine environmental data to produce a unified, validated dataset that supports monitoring, trend detection, and decision-making on marine conservation.
+Automate the ingestion, validation, cleaning, and consolidation of data on marine biodiversity, ocean conditions, and microplastic pollution in North America, in order to generate a unified and validated dataset that enables monitoring of critical coastal areas, analyzing environmental correlations, and supporting decision-making for marine conservation.
 
 ### Technical Objectives
-
-- Orchestrate multi-source extractions (microplastics DB, marine species CSV, Open-Meteo API) using **Airflow DAGs**.
-- Apply **data quality validation** via **Great Expectations** at both pre- and post-transformation stages.
-- Filter data geospatially to **North America** and unify by date and coordinates.
-- Store validated results in a **MySQL star-schema Data Warehouse**.
-- Automate report generation and ensure traceability of each pipeline run.
+- Orchestrate extractions from the _microplastics_, _climate_, and _species_ sources using Airflow.
+- Apply automated quality validations with Great Expectations before and after the cleaning steps.
+- Implement geospatial filters to restrict the data to North America.
+- Integrate the three datasets into a unified master table (by date, region, and coordinates).
+- Maintain traceability of runs and validation results in Airflow and the database.
+- Integrate the three datasets into a MySQL Data Warehouse.
+- Visualize real-time metrics from the Data Warehouse through a Kafka pipeline.
+- Build a dashboard that displays relevant information for analysis.
 
 ### Analytical Objectives
-
-- Compute environmental KPIs (average & maximum microplastic concentration, species richness, climate indicators).
-- Identify **critical coastal zones** with high pollution and low biodiversity.
-- Explore correlations between **pollution, climate, and biodiversity**.
-
----
+- Compute environmental KPIs for the region (e.g., average/maximum microplastic concentration, species richness, and wave conditions).
+- Identify critical zones with high microplastic accumulation and low biodiversity.
+- Analyze temporal and spatial correlations between pollution, climate, and marine community structure.
+- Provide interactive maps and dashboards to monitor trends and alerts.
 
 ## ETL Pipeline Architecture
-
 <p align="center">
   <img src="./diagrams/ETL_Pipeline.png" width="750"/>
 </p>
+The pipeline architecture combines batch processing using Apache Airflow with a streaming workflow powered by Kafka, enabling both historical data visualization and real-time streaming of metrics from the MySQL Data Warehouse. The complete process includes extraction, transformations, automated quality validations, and final loading for analytical consumption.
 
-**Pipeline flow:**
-1. Extract: Retrieves raw data from multiple sources: Microplastics and marine species datasets
-2.	First Transform (Grid Generation): Cleans and standardizes the raw datasets, then generates spatial grid references combining species and microplastic data. These grids define the coordinates used to request detailed climate records.
-3.	Climate Extraction: Oceanic climate data from the Open-Meteo API, based on generated grid coordinates. Uses the generated grids to download historical oceanic climate data (e.g., temperature, wind, and wave metrics) for each location.
-4.	Pre-Data Quality Check: Runs Great Expectations validations on the extracted data to ensure schema consistency, data completeness, and valid value ranges.
-5.	Final Transform (Integration): Combines microplastics, biodiversity, and climate datasets into a unified structure, aligning by spatial and temporal proximity. Outputs multiple processed files, including the final merged dataset.
-6.	Post-Data Quality Check: Re-runs Great Expectations to verify data integrity after transformation, generating both Excel and CSV quality reports.
-7.	Load: Loads the validated dataset into a MySQL star schema (marineDB) for analytical queries and visualization.
-8.	Visualization: The Dash dashboard presents environmental KPIs such as record counts, species diversity, microplastic levels, and average wave height.
-  
----
+The pipeline integrates three main data sources:
+- **microplastics_db (MySQL):** Database containing historical microplastic measurements.
+- **marine_species.csv:** File with taxonomic records and abundance of marine species.
+- **External climate/ocean API:** Source providing information on wave height, wind, and sea temperature.
+
+**Extraction**
+1. **Extract**: Retrieves raw data from multiple sources: Microplastics and marine species datasets
+2. **First Transform (Grid Generation)**: Cleans and standardizes the raw datasets, then generates spatial grid references combining species and microplastic data. These grids define the coordinates used to request detailed climate records.
+3. **Climate Extraction:** Oceanic climate data from the Open-Meteo API, based on generated grid coordinates. Uses the generated grids to download historical oceanic climate data (e.g., temperature, wind, and wave metrics) for each location.
+4. **Pre-Data Quality Check**: Runs Great Expectations validations on the extracted data to ensure schema consistency, data completeness, and valid value ranges.
+5. **Final Transform (Integration)**: Combines microplastics, biodiversity, and climate datasets into a unified structure, aligning by spatial and temporal proximity. Outputs multiple processed files, including the final merged dataset.
+6. **Post-Data Quality Check**: Re-runs Great Expectations to verify data integrity after transformation, generating both Excel and CSV quality reports.
+7. **Load**: Loads the validated dataset into a MySQL star schema (marineDB) for analytical queries and visualization.
+8. **Visualization:** The Dash dashboard presents environmental KPIs such as record counts, species diversity, microplastic levels, and average wave height.
+9. **Stream Pipeline (Kafka)**: In addition to the batch process, a streaming workflow is included to feed real-time microplastic metrics:
+	1. A Kafka producer continuously sends new microplastic records to the topic **microplastics-metric**.
+	2. A Kafka consumer receives these records and updates a real-time dashboard with live visualizations.
 
 ## Airflow DAG Design
-
 <p align="center">
   <img src="./diagrams/DAG Pipeline.png" width="700"/>
 </p>
-
 **DAG ID:** `etl_ods14_marine_life`
 **Schedule:** Daily (`@daily`)
-**Catchup:** Disabled (`False`)
 
 **Task flow:**
 
@@ -79,48 +81,6 @@ Automate the ingestion, validation, cleaning, and integration of marine environm
 | 6    | `transform_final_task`             | Performs full data transformation, merging climate, species, and microplastics. |
 | 7    | `validate_post_task`               | Applies post-merge data validation ensuring integrity and consistency.       |
 | 8    | `load_to_db_task`                  | Loads the final validated dataset into the MySQL Data Warehouse.             |
----
-
-## Data Extraction
-
-**Sources:**
-
-- **Microplastics:** MySQL table `microplastics` (measurement, sampling method, mesh size, etc.).
-- **Marine Species:** CSV data from GBIF (taxonomy, coordinates, event date).
-- **Ocean Climate:** REST API (`https://marine-api.open-meteo.com/v1/marine`) — provides daily ocean variables such as:
-  - Wave height, direction, and period
-  - Wind-wave and swell metrics
-  - Sea surface temperature
-
-Each extraction module saves CSV outputs into `/opt/airflow/data/` for subsequent stages.
-
----
-
-## Data Quality Validation (Great Expectations)
-
-Automated validation ensures **data integrity and reliability** before and after transformation.
-
-- **Library:** Great Expectations (`dataqualitycheck.py`)
-- **Validation stages:**
-  - *Pre-Data Quality:* checks for nulls, coordinate ranges, duplicates, and unit consistency.
-  - *Post-Data Quality:* re-evaluates integrity of merged data (domain & range rules).
-- **Output:** summarized **Excel reports** combining all validation results.
-
----
-
-## Transformation & Merge
-
-Performed by [`transform.py`](scripts/transform.py):
-
-1. **Normalization** – Standardizes column names and data types across all sources.
-2. **Filtering** – Keeps only records within the **North American geographic bounds**.
-3. **Grid creation** – Groups nearby coordinates into 3°×3° spatial cells.
-4. **Merging** –
-   - `microplastics` + `climate`: `merge_asof` (nearest date within 60-day tolerance).
-   - Adds aggregated species taxonomy by grid cell.
-5. **Output:**
-   - Clean datasets (`microplastics_clean.csv`, `marine_species_clean.csv`, `climate_clean.csv`)
-   - Unified dataset `merged_marine_data.csv`
 
 ---
 
@@ -146,6 +106,46 @@ Designed for fast analytical queries and flexible slicing by dimension.
 
 ---
 
+## Data Extraction
+
+**Sources:**
+- **Microplastics:** MySQL table `microplastics` (measurement, sampling method, mesh size, etc.).
+- **Marine Species:** CSV data from GBIF (taxonomy, coordinates, event date).
+- **Ocean Climate:** REST API (`https://marine-api.open-meteo.com/v1/marine`) — provides daily ocean variables such as:
+  - Wave height, direction, and period
+  - Wind-wave and swell metrics
+  - Sea surface temperature
+
+Each extraction module saves CSV outputs into `/opt/airflow/data/` for subsequent stages.
+
+---
+
+## Data Quality Validation (Great Expectations)
+Automated validation ensures **data integrity and reliability** before and after transformation.
+- **Library:** Great Expectations (`dataqualitycheck.py`)
+- **Validation stages:**
+  - *Pre-Data Quality:* checks for nulls, coordinate ranges, duplicates, and unit consistency.
+  - *Post-Data Quality:* re-evaluates integrity of merged data (domain & range rules).
+- **Output:** summarized **Excel reports** combining all validation results.
+
+---
+
+## Transformation & Merge
+
+Performed by [`transform.py`](scripts/transform.py):
+
+1. **Normalization** – Standardizes column names and data types across all sources.
+2. **Filtering** – Keeps only records within the **North American geographic bounds**.
+3. **Grid creation** – Groups nearby coordinates into 3°×3° spatial cells.
+4. **Merging** –
+   - `microplastics` + `climate`: `merge_asof` (nearest date within 60-day tolerance).
+   - Adds aggregated species taxonomy by grid cell.
+5. **Output:**
+   - Clean datasets (`microplastics_clean.csv`, `marine_species_clean.csv`, `climate_clean.csv`)
+   - Unified dataset `merged_marine_data.csv`
+
+---
+
 ## Dashboard Overview
 
 **Technology:** [Dash (Plotly)](https://dash.plotly.com/)
@@ -153,128 +153,165 @@ Designed for fast analytical queries and flexible slicing by dimension.
 **Execution:** runs locally and connects directly to `marineDB`.
 
 Features:
-
 - KPI Cards: total microplastic records, locations, species richness, climate records, and average concentration.
 Tabs:
-
 - Summary Overview: global view of microplastic pollution and climate trends.
 - Critical Zones: interactive map showing contamination hotspots.
 - Temporal Trends: time-series analysis of microplastic levels, biodiversity, and ocean conditions.
 - Biodiversity: taxonomic diversity and species exposure to microplastics.
 - Climate & Correlations: relationships between ocean climate variables and pollution levels.
 - Sampling Methods: comparison of collection techniques and concentration variability.
-  
+
+## Time Real Dashboard
+The system includes a real-time dashboard that consumes the data processed and sent to the Kafka topic microplastics_metrics.
+
+This panel allows continuous monitoring of environmental conditions and microplastic pollution across coastal regions of North America.
+
+**The real-time dashboard displays:**
+- **Live streaming** of windowed aggregated metrics.
+- **Average and maximum microplastic concentration** received over the last few minutes.
+- A **dynamic map** that updates sampling points as new events arrive.
+- **Automatic alerts** when values exceed predefined thresholds.
+- Operational indicators such as:
+    - Records processed per second (TPS).
+    - Ingestion and processing latency.
+    - Number of valid vs. discarded messages.
+
 ---
 
-How to Run Locally
+## How to Run Locally
 
 1. Clone the repository
-
-```
-git clone https://github.com/HEstefaniaR/ods14-Marine-ETL-2.git
-cd ods14-Marine-ETL-2
-```
+	```
+	git clone https://github.com/HEstefaniaR/ods14-Marine-ETL-2.git
+	cd ods14-Marine-ETL-2
+	```
 
 2. Download the data (required)
-
-Download the raw datasets from the following link: [data_raw](https://drive.google.com/drive/folders/1kI5Ygzks55naB40aIRATPcKPhOcrlKvT?usp=sharing)
-
-After downloading, place all files inside: `/data/data_raw/`.
-
-**Important**: The ETL pipeline and dashboard require these files to be present in data/data_raw before running any extraction or transformation scripts.
+	Download the raw datasets from the following link: [data_raw](https://drive.google.com/drive/folders/1kI5Ygzks55naB40aIRATPcKPhOcrlKvT?usp=sharing)
+	
+	After downloading, place all files inside: `/data/raw_data/`.
+	
+	**Important**: The ETL pipeline and dashboard require these files to be present in `data/raw_data` before running any extraction or transformation scripts.
 
 3. Create and activate a virtual environment
 
-```
-python -m venv venv
-source venv/bin/activate      # on Linux/Mac
-venv\Scripts\activate         # on Windows
-```
+	```
+	python -m venv venv
+	source venv/bin/activate      # on Linux/Mac
+	venv\Scripts\activate         # on Windows
+	```
 
 4. Install dependencies
 
-```
-pip install -r requirements.txt
-```
+	```
+	pip install -r requirements.txt
+	```
 
 5. Start MySQL and Airflow
 
-Ensure MySQL is running and accessible (default: host.docker.internal:3306).
-
-Edit the following files to update credentials if needed:
-	•	scripts/load.py
-	•	visualizations/dashboard.py
-	•	init/init-sql.py
-
-```
-USER = "root"
-PASSWORD = "root"
-HOST = "localhost"
-PORT = 3306
-```
-
-Then initialize the database schema:
-
-```
-python init/init-sql.py
-```
-
-Start Airflow and supporting services:
-
-```
-docker compose up -d
-```
-
+   Ensure MySQL is running and accessible (default: host.docker.internal:3306).
+   Edit the following files to update credentials if needed:
+	- `scripts/load.py`
+	- `visualizations/dashboard.py`
+	- `init/init-sql.py`
+	- `kafka/producer.py`
+	
+	```
+	USER = "root"
+	PASSWORD = "root"
+	HOST = "localhost"
+	PORT = 3306
+	```
+ 
+ 	Then initialize the database schema:
+	```
+	python init/init-sql.py
+	```
+	Start Airflow and supporting services:
+	```
+	docker compose up -d
+	```
 6. Launch the Dashboard
+	```
+	python visualizations/dashboard.py
+	```
 
-```
-python visualizations/dashboard.py
-```
+	Access the dashboard locally at: [http://localhost:8050](http://localhost:8050)
 
-Access the dashboard locally at: [http://localhost:8050](http://localhost:8050)
+7. To run Kafka, make sure you have Kafka installed locally and update the following parameters inside `start_kafka.sh` (Linux and Mac) or `start_kafka.bat` (Windows), depending on your OS:
+	
+	```
+	KAFKA_DIR='PATH_KAFKA'
+	PROJECT_DIR='PATH_REPOSITORY'
+	```
+	Then, run Zookeeper, Kafka, the consumer, and the producer using:
+	```
+	./start_kafka.sh (Linux or Mac)
+	./start_kafka.bat (Windows)
+	```
+	If you encounter a permission denied error, use: `chmod +x start_kafka.xx`
+
+	Once everything is running, access the real-time dashboard at: [http://localhost:8051](http://localhost:8051)
 
 ---
 
 ## Tools & Technologies
 
-| Layer          | Technology                                | Purpose                           |
-| -------------- | ----------------------------------------- | --------------------------------- |
-| Orchestration  | Apache Airflow                            | Automates ETL workflow            |
-| Extraction     | Python (Pandas, Requests, Open-Meteo API) | Reads raw data from DB, CSV, API  |
-| Transformation | Pandas, NumPy                             | Cleansing, normalization, merging |
-| Validation     | Great Expectations                        | Data quality assurance            |
-| Storage        | MySQL                                     | Dimensional Data Warehouse        |
-| Visualization  | Dash (Plotly)                             | Interactive dashboard             |
-| Environment    | Docker Compose                            | Containerized Airflow setup       |
-
+| **Layer**             | **Technology**                            | **Purpose**                                    |
+| --------------------- | ----------------------------------------- | ---------------------------------------------- |
+| Orchestration         | Apache Airflow                            | Automates and schedules the ETL workflow       |
+| Extraction            | Python (Pandas, Requests, Open-Meteo API) | Reads raw data from DB, CSV, and external API  |
+| Transformation        | Pandas, NumPy                             | Cleansing, normalization, merging              |
+| Validation            | Great Expectations                        | Automated data quality assurance               |
+| Storage               | MySQL                                     | Dimensional Data Warehouse                     |
+| Streaming & Real-Time | Apache Kafka                              | Sends microplastic metrics for live processing |
+| Visualization         | Dash (Plotly)                             | Interactive real-time dashboard                |
+| Environment           | Docker Compose                            | Containerized Airflow environment              |
 ---
 
 ## Repository Structure
 
 ```bash
-ODS14-MARINE-ETL-2/
-├── airflow/
-│   ├── config/airflow.cfg
-│   └── dags/dag_etl_pipeline.py
-├── init/init-sql.py
-├── scripts/
-│   ├── extract.py
-│   ├── transform.py
-│   ├── load.py
-│   ├── dataqualitycheck.py
-│   └── __init__.py
-├── visualizations/dashboard.py
-├── diagrams/
+.
 ├── EDA.ipynb
-├── docker-compose.yaml
+├── README.md
+├── airflow
+│   ├── config
+│   │   └── airflow.cfg
+│   ├── dags
+│   │   └── dag_etl_pipeline.py
+│   └── plugins
+├── data
+│   ├── processed_data
+│   └── raw_data
+│       ├── marine_species.csv
+│       └── microplastics.csv
+├── diagrams
+├── init
+│   └── init-sql.py
+├── kafka
+│   ├── consumer.py
+│   └── producer.py
 ├── requirements.txt
-└── README.md
+├── scripts
+│   ├── __init__.py
+│   ├── dataqualitycheck.py
+│   ├── extract.py
+│   ├── load.py
+│   └── transform.py
+├── docker-compose.yaml
+├── start_kafka.bat
+├── start_kafka.sh
+└── visualizations
+    └── dashboard.py
 ```
 
 ---
-
 ## Authors
 
 **Natalia Paredes Cambindo**, **Estefanía Hernández Rojas**, **Fabián Gomezcasseres**
+
 _Universidad Autónoma de Occidente_
+
 Teacher: **Breyner Posso Bautista**

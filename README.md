@@ -63,9 +63,11 @@ The pipeline integrates three main data sources:
 	2. A Kafka consumer receives these records and updates a real-time dashboard with live visualizations.
 
 ## Airflow DAG Design
+
 <p align="center">
   <img src="./diagrams/DAG Pipeline.png" width="700"/>
 </p>
+
 **DAG ID:** `etl_ods14_marine_life`
 **Schedule:** Daily (`@daily`)
 
